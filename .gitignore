@@ -1,0 +1,36 @@
+/node_modules/
+/.pnpm-store/
+
+# Build output and coverage reports
+/dist/
+/build/
+/coverage/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.pfx
+
+# Runtime SQLite databases and sidecar files
+/data/*.sqlite
+/data/*.sqlite-*
+/data/*.db
+/data/*.db-*
+
+# Local caches, temporary exports, and logs
+/.cache/
+/.vite/
+/tmp/
+*.log
+*.tsbuildinfo
+npm-debug.log*
+pnpm-debug.log*
+
+# Operating system and IDE files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
