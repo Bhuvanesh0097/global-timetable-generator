@@ -65,7 +65,6 @@ export interface GenericActivity extends GenericAssignedWork {
 export interface GenericPlacementConfig extends GenericAssignedWork {
   enabled: boolean
   weeklyPeriods: number
-  blockDuration: number
 }
 
 export interface GenericPlacementAlternateTeacherAssignment {

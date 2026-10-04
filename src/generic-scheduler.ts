@@ -138,7 +138,7 @@ function validStartsForBlock(opts: { isLab?: boolean; isPlacement?: boolean; isN
   return starts
 }
 
-function normalizeRows<T extends { id: string; name: string; code?: string; abbreviation?: string; allowedStartPeriods?: number[]; teacherAssignments: Array<{ sectionId: string; teacherId: string }> }>(
+function normalizeRows<T extends { id: string; name: string; code?: string; abbreviation?: string; blockDuration?: number; allowedStartPeriods?: number[]; teacherAssignments: Array<{ sectionId: string; teacherId: string }> }>(
   rows: T[] | undefined,
   kind: ItemKind,
   periodCount: (row: T) => number,
