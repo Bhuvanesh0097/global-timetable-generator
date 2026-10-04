@@ -28,4 +28,9 @@ function timetableApiPlugin() {
   }
 }
 
-export default defineConfig({ plugins: [react(), timetableApiPlugin()] })
+export default defineConfig({
+  plugins: [react(), timetableApiPlugin()],
+  preview: {
+    allowedHosts: ['global-timetable-generator.onrender.com'],
+  },
+})
