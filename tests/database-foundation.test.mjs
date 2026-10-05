@@ -96,3 +96,81 @@ test('PostgreSQL repository persists configuration, versions, snapshots, and loc
     await testDatabase.cleanup()
   }
 })
+
+test('global occupancy uses only the authoritative active timetable version and preserves history', async () => {
+  const testDatabase = await createTestPostgresRepository()
+  const repository = testDatabase.repository
+  try {
+    const identity = {
+      department: 'CSE', year: 'III / 3rd Year', semester: 'V / 5th Semester', academicYear: '2026 - 2027',
+    }
+    const staff = [
+      { id: 'teacher-old', name: 'Historical Teacher' },
+      { id: 'teacher-active', name: 'Active Teacher' },
+    ]
+    const configuration = {
+      ...identity,
+      sections: [{ id: 'A' }],
+      staff,
+      subjects: [{
+        id: 'subject-1', code: 'CSE501', name: 'Algorithms', weeklyHours: 48,
+        teacherAssignments: [{ sectionId: 'A', teacherId: 'teacher-old' }],
+      }],
+    }
+    const configurationId = await repository.createTimetableConfiguration(configuration)
+    const makeSchedule = (teacherId) => Object.fromEntries(
+      ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'].map((day) => [
+        day,
+        Object.fromEntries(Array.from({ length: 8 }, (_, index) => [index + 1, {
+          itemId: 'subject-1', code: 'CSE501', abbreviation: 'ALG', name: 'Algorithms',
+          teacherId, kind: 'core',
+        }])),
+      ]),
+    )
+    const saveGeneration = (generationId, teacherId) => repository.saveGeneratedTimetableData({
+      configurationId,
+      generationId,
+      sections: [{ sectionId: 'A', schedule: makeSchedule(teacherId) }],
+      setupSnapshot: { staff },
+      validation: {},
+      staff,
+    })
+
+    const [historical] = await saveGeneration('generation-historical', 'teacher-old')
+    await repository.setSavedTimetableVersionStatus({ versionId: historical.id, status: 'LOCKED' })
+    const [active] = await saveGeneration('generation-active', 'teacher-active')
+
+    const occupancy = await repository.getTeacherUnavailableOccupancy({
+      identity: { department: 'IOT', year: 'I', semester: 'I', academicYear: identity.academicYear },
+      staff,
+    })
+    assert.deepEqual([...new Set(occupancy.unavailableSlots.map(({ teacherId }) => teacherId))], ['teacher-active'])
+    assert.deepEqual([...new Set(occupancy.alternateWeekUnavailableSlots.map(({ teacherId }) => teacherId))], ['teacher-active'])
+    assert.equal(occupancy.unavailableSlots.length, 48)
+
+    const candidateSection = (teacherId) => ({
+      sectionId: 'B',
+      schedule: { Monday: { 3: { teacherId, name: 'Candidate Subject' } } },
+    })
+    const historicalTeacherConflicts = await repository.getTeacherGenerationOccupancyConflicts({
+      identity: { department: 'IOT', year: 'I', semester: 'I', academicYear: identity.academicYear },
+      sections: [candidateSection('teacher-old')],
+      staff,
+    })
+    const activeTeacherConflicts = await repository.getTeacherGenerationOccupancyConflicts({
+      identity: { department: 'IOT', year: 'I', semester: 'I', academicYear: identity.academicYear },
+      sections: [candidateSection('teacher-active')],
+      staff,
+    })
+    assert.equal(historicalTeacherConflicts.length, 0)
+    assert.equal(activeTeacherConflicts.length, 1)
+
+    const history = await repository.getSavedTimetableNavigation()
+    assert.equal(history.length, 2)
+    assert.equal(history.find(({ versionId }) => versionId === historical.id).status, 'LOCKED')
+    assert.equal(history.find(({ versionId }) => versionId === historical.id).isActive, false)
+    assert.equal(history.find(({ versionId }) => versionId === active.id).isActive, true)
+  } finally {
+    await testDatabase.cleanup()
+  }
+})

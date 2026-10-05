@@ -551,6 +551,50 @@ test('generic generation rejects an impossible clash with a previously accepted 
   assert.ok(next.blockingConstraints.includes('No partial timetable was returned.'))
 })
 
+test('saved global teacher occupancy rejects one slot and routes the new timetable to another', () => {
+  const restrictedTeacher = 'global-teacher'
+  const availableTeacher = 'available-teacher'
+  const config = {
+    ...identity,
+    department: 'IOT',
+    sections: [{ id: 'A' }],
+    staff: [
+      { id: restrictedTeacher, name: 'Global Teacher' },
+      { id: availableTeacher, name: 'Available Teacher' },
+    ],
+    subjects: [
+      ...coreRows(46, 'restricted', 'R', 'Restricted Subject', [{ sectionId: 'A', teacherId: restrictedTeacher }]),
+      ...coreRows(2, 'available', 'A', 'Available Subject', [{ sectionId: 'A', teacherId: availableTeacher }]),
+    ],
+    rules: { coreDailyMaximum: 8, coreConsecutiveMaximum: 8 },
+    candidateCount: 1,
+    randomSeed: 31,
+  }
+
+  const result = generateGenericTimetable({
+    schedules: [config],
+    unavailableTeacherSlots: [{ teacherId: restrictedTeacher, day: 'Monday', period: 3 }],
+  })
+  assertEverySectionIsComplete(result, 1)
+  if (!result.ok) return
+  assert.notEqual(result.sections[0].schedule.Monday[3].teacherId, restrictedTeacher)
+  assert.equal(result.validation.globalTeacherClashes, 0)
+})
+
+test('Placement block routing rejects the full block when its alternate teacher is occupied in one period', () => {
+  const config = placementExceptionConfig(2, { startPeriod: 5, otherAlternates: true })
+  const result = generateGenericTimetable({
+    schedules: [config],
+    alternateWeekUnavailableTeacherSlots: [{ teacherId: 'core-teacher', day: 'Monday', period: 6 }],
+  })
+  assertEverySectionIsComplete(result, 1)
+  if (!result.ok) return
+  const placement = scheduleEntries(result).filter(({ cell }) => cell.kind === 'activity' && cell.name === 'Placement')
+  assert.equal(placement.length, 2)
+  assert.equal(new Set(placement.map(({ day }) => day)).size, 1)
+  assert.notEqual(placement[0].day, 'Monday')
+})
+
 test('sections with separate teachers still receive different subject-grid arrangements', () => {
   const result = generateGenericTimetable({
     ...identity,

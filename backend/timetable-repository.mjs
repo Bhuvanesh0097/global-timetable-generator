@@ -674,6 +674,7 @@ export class TimetableRepository {
       JOIN generated_timetables timetables ON timetables.id = versions.timetable_id
       JOIN timetable_configurations configurations ON configurations.id = timetables.configuration_id
       WHERE versions.status IN ('SAVED', 'LOCKED')
+        AND versions.id = timetables.active_version_id
         AND NOT (
           configurations.department = ? AND configurations.year = ?
           AND configurations.semester = ? AND configurations.academic_year = ?
@@ -786,6 +787,7 @@ export class TimetableRepository {
       JOIN sections ON sections.id = timetables.section_id
       JOIN timetable_configurations configurations ON configurations.id = timetables.configuration_id
       WHERE versions.status IN ('SAVED', 'LOCKED')
+        AND versions.id = timetables.active_version_id
         AND NOT (
           configurations.department = ? AND configurations.year = ?
           AND configurations.semester = ? AND configurations.academic_year = ?

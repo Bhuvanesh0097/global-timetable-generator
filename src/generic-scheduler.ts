@@ -983,7 +983,16 @@ function buildSchedule(
     let selected: BlockTask | undefined
     let candidates: BlockCandidate[] = []
     for (const task of pending) {
+      if (previousEquivalentTasks.get(task.id)!.some((previous) => !assigned.has(previous.id))) continue
       const options = candidatesFor(task)
+      const equivalentTasksRemaining = equivalentTaskGroups
+        .get(JSON.stringify([task.item.id, task.duration, task.isTest]))!
+        .filter((equivalent) => !assigned.has(equivalent.id)).length
+      if (options.length < equivalentTasksRemaining) {
+        const reason = `${task.item.name}: ${options.length} legal block start(s) remain for ${equivalentTasksRemaining} equivalent blocks.`
+        searchDeadEnds.set(reason, (searchDeadEnds.get(reason) ?? 0) + 1)
+        return false
+      }
       if (!selected || options.length < candidates.length) { selected = task; candidates = options }
       if (!options.length) {
         const reason = `${task.item.name}: its ${task.duration}-period block has no legal remaining placement.`
