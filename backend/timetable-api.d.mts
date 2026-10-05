@@ -19,7 +19,11 @@ export interface TimetableGenerationWorkerOutput {
 
 export function createTimetableApiMiddleware(
   repository: TimetableRepository,
-  options?: { runGeneration?: (input: TimetableGenerationWorkerInput) => Promise<TimetableGenerationWorkerOutput> },
+  options?: {
+    runGeneration?: (input: TimetableGenerationWorkerInput) => Promise<TimetableGenerationWorkerOutput>
+    maximumRetainedGenerationJobs?: number
+    generationJobRetentionMs?: number
+  },
 ): (
   request: IncomingMessage,
   response: ServerResponse,

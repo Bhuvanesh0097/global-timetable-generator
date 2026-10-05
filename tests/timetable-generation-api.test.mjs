@@ -174,6 +174,85 @@ test('generation requests return immediately while the worker continues and can 
   })
 })
 
+test('deduplicates identical in-flight requests but keeps different reserved sections separate', async () => {
+  const releases = []
+  let generationCalls = 0
+  const repository = {
+    async getTeacherUnavailableOccupancy() {
+      return { unavailableSlots: [], alternateWeekUnavailableSlots: [] }
+    },
+    async getTeacherGenerationOccupancyConflicts() {
+      return []
+    },
+  }
+
+  await withApi(repository, () => {
+    generationCalls += 1
+    return new Promise((resolve) => releases.push(resolve))
+  }, async (origin) => {
+    const reversedConfiguration = Object.fromEntries(Object.entries(configuration).reverse())
+    const [first, duplicate, different] = await Promise.all([
+      postGeneration(origin, { configuration, reservedSections: [] }),
+      postGeneration(origin, { configuration: reversedConfiguration, reservedSections: [] }),
+      postGeneration(origin, { configuration, reservedSections: [{ sectionId: 'B', schedule: {} }] }),
+    ])
+
+    assert.equal(first.jobId, duplicate.jobId)
+    assert.notEqual(first.jobId, different.jobId)
+    for (let attempt = 0; attempt < 100 && generationCalls < 2; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+    assert.equal(generationCalls, 2)
+
+    const result = {
+      result: { ok: false, code: 'UNSATISFIABLE', message: 'No valid timetable.', blockingConstraints: [] },
+    }
+    releases.forEach((release) => release(result))
+    await Promise.all([waitForGeneration(origin, first.jobId), waitForGeneration(origin, different.jobId)])
+  })
+})
+
+test('does not reuse completed results and prunes completed jobs after the configured retention', async () => {
+  let generationCalls = 0
+  const middleware = createTimetableApiMiddleware({
+    async getTeacherUnavailableOccupancy() {
+      return { unavailableSlots: [], alternateWeekUnavailableSlots: [] }
+    },
+    async getTeacherGenerationOccupancyConflicts() {
+      return []
+    },
+  }, {
+    generationJobRetentionMs: 20,
+    runGeneration: async () => {
+      generationCalls += 1
+      return {
+        result: { ok: false, code: 'UNSATISFIABLE', message: 'No valid timetable.', blockingConstraints: [] },
+      }
+    },
+  })
+  const server = createServer((request, response) => {
+    void middleware(request, response, () => {
+      response.statusCode = 404
+      response.end()
+    })
+  })
+  await new Promise((resolve, reject) => server.listen(0, '127.0.0.1', (error) => error ? reject(error) : resolve()))
+  try {
+    const origin = `http://127.0.0.1:${server.address().port}`
+    const first = await postGeneration(origin, { configuration, reservedSections: [] })
+    await waitForGeneration(origin, first.jobId)
+    await new Promise((resolve) => setTimeout(resolve, 30))
+
+    const second = await postGeneration(origin, { configuration, reservedSections: [] })
+    assert.notEqual(first.jobId, second.jobId)
+    await waitForGeneration(origin, second.jobId)
+    assert.equal(generationCalls, 2)
+    assert.equal((await fetch(`${origin}/api/timetable/generation-jobs/${first.jobId}`)).status, 404)
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
 test('generation worker failures are returned as structured job errors', async () => {
   await withApi({
     async getTeacherUnavailableOccupancy() {

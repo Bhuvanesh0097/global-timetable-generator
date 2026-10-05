@@ -2,7 +2,10 @@ import type { TimetableGenerationWorkerInput, TimetableGenerationWorkerOutput } 
 
 export function createGenericSchedulerWorkerPool(options?: {
   workerCount?: number | string
-  maximumQueueSize?: number
+  maximumQueueSize?: number | string
+  workerTimeoutMs?: number | string
+  queueWaitTimeoutMs?: number | string
+  workerUrl?: URL
 }): {
   run(input: TimetableGenerationWorkerInput): Promise<TimetableGenerationWorkerOutput>
   close(): Promise<void>

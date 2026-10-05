@@ -1093,6 +1093,7 @@ function App() {
   })
   const selectionRef = useRef(selection)
   const savedOpenRequestRef = useRef(0)
+  const generationRequestInFlightRef = useRef(false)
   selectionRef.current = selection
   const [configurations, setConfigurations] = useState<Record<string, TimetableSetup>>({})
   const [sectionCountInput, setSectionCountInput] = useState('1')
@@ -1277,7 +1278,7 @@ function App() {
     setEditingStaffId(null)
   }
   const [openSection, setOpenSection] = useState<SectionKey | null>('academic')
-  const [generationResult, setGenerationResult] = useState<TimetableGenerationResult | null>(null)
+  const [generationResult, setGenerationResult] = useState<TimetableGenerationResult | GenericTimetableGenerationResult | null>(null)
   const [generationId, setGenerationId] = useState<string | null>(null)
   const [savedGenerationId, setSavedGenerationId] = useState<string | null>(null)
   const [savedVersions, setSavedVersions] = useState<SavedTimetableVersionSummary[]>([])
@@ -1582,7 +1583,15 @@ function App() {
     }
   })
   const generate = async () => {
-    if (!canGenerate) return
+    if (!canGenerate || generationRequestInFlightRef.current) return
+    generationRequestInFlightRef.current = true
+    try {
+      await performGeneration()
+    } finally {
+      generationRequestInFlightRef.current = false
+    }
+  }
+  const performGeneration = async () => {
     savedOpenRequestRef.current += 1
     setOpeningVersion(false)
     const generationSelectionKey = selectedConfigurationKey
@@ -1645,10 +1654,19 @@ function App() {
       }
     } catch (error) {
       if (academicConfigurationKey(selectionRef.current) !== generationSelectionKey) return
+      const errorCode = error && typeof error === 'object' && 'code' in error
+        && typeof error.code === 'string' ? error.code : 'SCHEDULER_UNAVAILABLE'
+      const schedulerErrorCode = errorCode === 'SCHEDULER_CAPACITY'
+        || errorCode === 'SCHEDULER_TIMEOUT'
+        || errorCode === 'SCHEDULER_QUEUE_TIMEOUT'
+        || errorCode === 'SCHEDULER_WORKER_FAILED'
+        || errorCode === 'SCHEDULER_UNAVAILABLE'
+        ? errorCode
+        : 'SCHEDULER_UNAVAILABLE'
       result = {
         ok: false,
-        code: 'UNSATISFIABLE',
-        message: 'Timetable generation failed, so no timetable was returned.',
+        code: schedulerErrorCode,
+        message: error instanceof Error ? error.message : 'The timetable generation service is unavailable.',
         blockingConstraints: [error instanceof Error ? error.message : 'The timetable generation service is unavailable.'],
       }
     }
@@ -2038,7 +2056,15 @@ function App() {
             <TeacherTimetableFeature setup={outputSetup} sections={completeGeneration.sections} />
           </>
         : generationResult
-          ? <div className="generation-error" role="alert"><strong>Timetable could not be generated with the current constraints.</strong>{!generationResult.ok ? <ul>{generationResult.blockingConstraints.map((constraint) => <li key={constraint}>{constraint}</li>)}</ul> : <p>{incompleteGenerationMessage}</p>}</div>
+          ? <div className="generation-error" role="alert"><strong>{generationResult.ok ? 'Timetable generation failed.' : generationResult.code === 'SCHEDULER_CAPACITY'
+            ? 'The generation queue is full. Please try again shortly.'
+              : generationResult.code === 'SCHEDULER_TIMEOUT'
+                ? 'Generation exceeded the allowed server calculation time.'
+                : generationResult.code === 'SCHEDULER_QUEUE_TIMEOUT'
+                  ? 'Generation waited too long in the server queue.'
+                : generationResult.code === 'SCHEDULER_WORKER_FAILED' || generationResult.code === 'SCHEDULER_UNAVAILABLE'
+                  ? 'The scheduler service could not complete the request.'
+                  : 'Timetable could not be generated with the current constraints.'}</strong>{!generationResult.ok ? <ul>{generationResult.blockingConstraints.map((constraint) => <li key={constraint}>{constraint}</li>)}</ul> : <p>{incompleteGenerationMessage}</p>}</div>
           : <p className="no-timetable-placeholder">No timetable generated yet.</p>}
       <ConsolidatedFacultyTimetable />
       </main>

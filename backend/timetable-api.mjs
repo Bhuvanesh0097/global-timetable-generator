@@ -1,9 +1,9 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { runGenericTimetableGeneration } from './generic-scheduler-worker-pool.mjs'
 
 const maximumBodyBytes = 2 * 1024 * 1024
-const maximumRetainedGenerationJobs = 256
-const generationJobRetentionMs = 30 * 60 * 1000
+const defaultMaximumRetainedGenerationJobs = 1024
+const defaultGenerationJobRetentionMs = 10 * 60 * 1000
 const supportedDays = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
 const setupArrayFields = [
   'staff', 'sections', 'coreSubjects', 'otherSubjectMaster', 'otherSubjects', 'labMaster',
@@ -96,6 +96,18 @@ function generationStaff(configuration) {
   return configuration.staff.filter((teacher) => teacherIds.has(teacher.id))
 }
 
+function canonicalizeGenerationInput(value) {
+  if (Array.isArray(value)) return value.map(canonicalizeGenerationInput)
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalizeGenerationInput(value[key])]))
+  }
+  return value
+}
+
+function generationFingerprint(input) {
+  return createHash('sha256').update(JSON.stringify(canonicalizeGenerationInput(input))).digest('hex')
+}
+
 function generationConflictMessage(conflicts) {
   return conflicts.map(({ teacherName, day, period, week, existing, candidate }) => [
     `Teacher: ${teacherName}`,
@@ -108,14 +120,20 @@ function generationConflictMessage(conflicts) {
 /** Same-origin JSON endpoints backed by the PostgreSQL timetable repository. */
 export function createTimetableApiMiddleware(repository, {
   runGeneration = runGenericTimetableGeneration,
+  maximumRetainedGenerationJobs = defaultMaximumRetainedGenerationJobs,
+  generationJobRetentionMs = defaultGenerationJobRetentionMs,
 } = {}) {
   const generationJobs = new Map()
+  const activeGenerationFingerprints = new Map()
 
   const pruneGenerationJobs = () => {
     const expiredBefore = Date.now() - generationJobRetentionMs
     for (const [jobId, job] of generationJobs) {
       if (job.status !== 'queued' && job.status !== 'running' && job.finishedAt < expiredBefore) {
         generationJobs.delete(jobId)
+        if (activeGenerationFingerprints.get(job.fingerprint) === jobId) {
+          activeGenerationFingerprints.delete(job.fingerprint)
+        }
       }
     }
   }
@@ -180,6 +198,9 @@ export function createTimetableApiMiddleware(repository, {
       job.status = 'failed'
     } finally {
       job.finishedAt = Date.now()
+      if (activeGenerationFingerprints.get(job.fingerprint) === job.id) {
+        activeGenerationFingerprints.delete(job.fingerprint)
+      }
     }
   }
 
@@ -197,14 +218,26 @@ export function createTimetableApiMiddleware(repository, {
         }
         const identity = generationIdentity(configuration)
         const occupancyStaff = generationStaff(configuration)
+        const fingerprint = generationFingerprint({ configuration, reservedSections })
         pruneGenerationJobs()
+        const existingJobId = activeGenerationFingerprints.get(fingerprint)
+        const existingJob = existingJobId ? generationJobs.get(existingJobId) : undefined
+        if (existingJob && (existingJob.status === 'queued' || existingJob.status === 'running')) {
+          sendJson(response, 202, { jobId: existingJobId })
+          return
+        }
+        if (existingJobId) activeGenerationFingerprints.delete(fingerprint)
         if (generationJobs.size >= maximumRetainedGenerationJobs) {
-          sendJson(response, 503, { error: 'The timetable generation service is busy. Please wait briefly and try again.', code: 'SCHEDULER_CAPACITY' })
+          sendJson(response, 503, {
+            error: 'The generation job registry is at capacity. Please try again shortly.',
+            code: 'SCHEDULER_CAPACITY',
+          })
           return
         }
         const jobId = randomUUID()
-        const job = { status: 'queued' }
+        const job = { id: jobId, fingerprint, status: 'queued' }
         generationJobs.set(jobId, job)
+        activeGenerationFingerprints.set(fingerprint, jobId)
         sendJson(response, 202, { jobId })
         setImmediate(() => {
           void runGenerationJob(job, {

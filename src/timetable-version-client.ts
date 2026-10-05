@@ -56,8 +56,12 @@ async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
   } catch {
     throw new Error('Timetable version storage is unavailable. Check the database service and try again.')
   }
-  const payload = await response.json().catch(() => ({})) as { error?: string } & T
-  if (!response.ok) throw new Error(payload.error || `Timetable version request failed (${response.status}).`)
+  const payload = await response.json().catch(() => ({})) as { error?: string; code?: string } & T
+  if (!response.ok) {
+    throw Object.assign(new Error(payload.error || `Timetable version request failed (${response.status}).`), {
+      code: payload.code,
+    })
+  }
   return payload
 }
 
@@ -167,13 +171,14 @@ async function createGenerationRequest(input: {
       status: 'queued' | 'running' | 'completed' | 'failed'
       value?: GenericTimetableGenerationResponse
       error?: string
+      code?: string
     }>(`/api/timetable/generation-jobs/${encodeURIComponent(jobId)}`)
     if (job.status === 'completed') {
       if (!job.value?.result) throw new Error('The timetable generation service returned an invalid job result.')
       return job.value
     }
     if (job.status === 'failed') {
-      throw new Error(job.error || 'The timetable generation service failed.')
+      throw Object.assign(new Error(job.error || 'The timetable generation service failed.'), { code: job.code })
     }
     pollInterval = Math.min(2_000, Math.round(pollInterval * 1.5))
   }

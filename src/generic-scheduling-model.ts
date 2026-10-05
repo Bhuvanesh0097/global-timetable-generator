@@ -234,4 +234,17 @@ export interface GenericTimetableValidationSummary {
 
 export type GenericTimetableGenerationResult =
   | { ok: true; sections: GenericGeneratedSection[]; searchNodes: number; validation: GenericTimetableValidationSummary }
-  | { ok: false; code: 'INVALID_INPUT' | 'UNSATISFIABLE' | 'SEARCH_LIMIT'; message: string; blockingConstraints: string[] }
+  | {
+    ok: false
+    code:
+      | 'INVALID_INPUT'
+      | 'UNSATISFIABLE'
+      | 'SEARCH_LIMIT'
+      | 'SCHEDULER_CAPACITY'
+      | 'SCHEDULER_TIMEOUT'
+      | 'SCHEDULER_QUEUE_TIMEOUT'
+      | 'SCHEDULER_WORKER_FAILED'
+      | 'SCHEDULER_UNAVAILABLE'
+    message: string
+    blockingConstraints: string[]
+  }
