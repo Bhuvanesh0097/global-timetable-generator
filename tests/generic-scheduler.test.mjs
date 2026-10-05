@@ -260,6 +260,30 @@ test('generic engine applies 3-first lab blocks and counts P1 tests inside subje
   assert.equal(cells.filter(({ cell }) => cell.itemId === 'activity:A:activity-2').length, 8)
 })
 
+test('repeated continuous blocks are searched without exploring equivalent permutations', () => {
+  const config = oneSectionConfig(24, {
+    labs: [{
+      id: 'full-week-lab',
+      name: 'Full Week Lab',
+      weeklyPeriods: 24,
+      blockDuration: 4,
+      teacherAssignments: [{ sectionId: 'A', teacherId: 'lab-teacher' }],
+    }],
+    candidateCount: 2,
+  })
+  config.randomSeed = 8112026
+
+  const result = generateGenericTimetable(config)
+
+  assertEverySectionIsComplete(result, 1)
+  if (!result.ok) return
+  assert.equal(result.searchNodes < 200, true, `expected symmetry-pruned search, got ${result.searchNodes} nodes`)
+  const labBlocks = collectBlocks(scheduleEntries(result), ({ cell }) => cell.kind === 'lab')
+  assert.equal(labBlocks.length, 6)
+  assert.ok(labBlocks.every((block) => block.length === 4))
+  assert.equal(new Set(labBlocks.map((block) => block[0].day)).size, 6)
+})
+
 test('generic lab weekly totals split into 3-first continuous blocks, including remainder blocks', () => {
   for (const weeklyPeriods of [6, 3, 2, 4, 5]) {
     const result = generateGenericTimetable({

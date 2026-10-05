@@ -609,6 +609,7 @@ function buildSchedule(
 
   let searchNodes = 0
   let exceededLimit = false
+  const searchDeadEnds = new Map<string, number>()
   const configuredSearchLimit = Math.min(...profiles.map(({ profile }) => profile.rules?.searchNodeLimit ?? defaultSearchNodeLimit))
   const searchLimit = Math.min(configuredSearchLimit, requestedSearchLimit ?? configuredSearchLimit)
 
@@ -873,12 +874,36 @@ function buildSchedule(
     if (isNormalActivity(item)) specialActivityAtDay.delete(sectionDayKey(item, candidate.dayIndex))
   }
 
-  const candidatesFor = (task: BlockTask): BlockCandidate[] => {
-    if (task.isTest) {
-      return shuffled(genericTimetableDays.map((_, dayIndex) => ({ dayIndex, startPeriod: 1 })), random).filter((candidate) => canPlace(task, candidate))
+  const equivalentTaskGroups = new Map<string, BlockTask[]>()
+  const previousEquivalentTasks = new Map<string, BlockTask[]>()
+  const taskStartPeriods = new Map<string, number[]>()
+  for (const task of tasks) {
+    const key = JSON.stringify([task.item.id, task.duration, task.isTest])
+    const group = equivalentTaskGroups.get(key) ?? []
+    previousEquivalentTasks.set(task.id, [...group])
+    group.push(task)
+    equivalentTaskGroups.set(key, group)
+    if (!task.isTest) {
+      taskStartPeriods.set(task.id, validStartsForBlock(
+        { ...task.item, isNormalActivity: isNormalActivity(task.item) },
+        task.duration,
+        task.item.rules,
+      ))
     }
-    const starts = validStartsForBlock({ ...task.item, isNormalActivity: isNormalActivity(task.item) }, task.duration, task.item.rules)
-    return shuffled(genericTimetableDays.flatMap((_, dayIndex) => shuffled(starts, random).map((startPeriod) => ({ dayIndex, startPeriod }))), random)
+  }
+  const assignedCandidates = new Map<string, BlockCandidate>()
+  const candidatesFor = (task: BlockTask): BlockCandidate[] => {
+    const candidates = task.isTest
+      ? genericTimetableDays.map((_, dayIndex) => ({ dayIndex, startPeriod: 1 }))
+      : genericTimetableDays.flatMap((_, dayIndex) =>
+        taskStartPeriods.get(task.id)!.map((startPeriod) => ({ dayIndex, startPeriod })))
+    const previousPositions = previousEquivalentTasks.get(task.id)!
+      .map((previous) => assignedCandidates.get(previous.id))
+      .filter((candidate): candidate is BlockCandidate => candidate !== undefined)
+      .map((candidate) => candidate.dayIndex * genericPeriodsPerDay + candidate.startPeriod)
+    const minimumPosition = previousPositions.length ? Math.max(...previousPositions) : -1
+    return candidates
+      .filter((candidate) => candidate.dayIndex * genericPeriodsPerDay + candidate.startPeriod > minimumPosition)
       .filter((candidate) => canPlace(task, candidate))
   }
 
@@ -886,37 +911,63 @@ function buildSchedule(
     if (++searchNodes > searchLimit) { exceededLimit = true; return false }
     let chosenSlot: { sectionId: string; dayIndex: number; period: number } | undefined
     let chosenItems: WorkItem[] = []
+    const candidateCounts = new Map<WorkItem, number>()
+    const candidatesBySlot = new Map<string, WorkItem[]>()
+    const pendingItems = normalizedSections.flatMap((section) =>
+      (itemsBySection.get(section.key) ?? []).filter((item) =>
+        !item.schedulesAsBlocks && item.blockDuration === 1 && item.remaining > 0))
+    if (!pendingItems.length) return [...states.values()].every((state) => state.cells.every(Boolean))
+      && areSectionArrangementsUniqueWithReserved(normalizedSections, states, reservedSections)
+
+    for (const item of pendingItems) {
+      const task = { id: `single:${item.id}`, item, duration: 1, isTest: false }
+      const candidates = genericTimetableDays.flatMap((_, dayIndex) =>
+        periods.map((period) => ({ dayIndex, startPeriod: period })))
+        .filter((candidate) => canPlace(task, candidate))
+      if (candidates.length < item.remaining) {
+        const reason = `${item.name}: only ${candidates.length} legal period(s) remain for ${item.remaining} required period(s).`
+        searchDeadEnds.set(reason, (searchDeadEnds.get(reason) ?? 0) + 1)
+        return false
+      }
+      candidateCounts.set(item, candidates.length)
+      for (const candidate of candidates) {
+        const index = slotIndex(candidate.dayIndex, candidate.startPeriod)
+        const key = `${item.sectionId}:${index}`
+        const items = candidatesBySlot.get(key) ?? []
+        items.push(item)
+        candidatesBySlot.set(key, items)
+      }
+    }
     for (const section of normalizedSections) {
       const cells = states.get(section.key)!.cells
       for (let dayIndex = 0; dayIndex < genericTimetableDays.length; dayIndex += 1) {
         for (const period of periods) {
-          if (cells[slotIndex(dayIndex, period)]) continue
-          const probe: BlockCandidate = { dayIndex, startPeriod: period }
-          const candidates = (itemsBySection.get(section.key) ?? []).filter((item) => !item.schedulesAsBlocks && item.blockDuration === 1 && item.remaining > 0)
-            .filter((item) => canPlace({ id: `single:${item.id}`, item, duration: 1, isTest: false }, probe))
-          if (!candidates.length) return false
-          if (!chosenSlot || candidates.length < chosenItems.length) {
+          const index = slotIndex(dayIndex, period)
+          if (cells[index]) continue
+          const items = candidatesBySlot.get(`${section.key}:${index}`) ?? []
+          if (!items.length) return false
+          if (!chosenSlot || items.length < chosenItems.length) {
             chosenSlot = { sectionId: section.key, dayIndex, period }
-            chosenItems = candidates
+            chosenItems = items
           }
         }
       }
     }
-    if (!chosenSlot) return [...states.values()].every((state) => state.cells.every(Boolean))
-      && areSectionArrangementsUniqueWithReserved(normalizedSections, states, reservedSections)
+    if (!chosenSlot) return false
 
     const candidates = shuffled(chosenItems, random).sort((left, right) => {
       const leftDayCount = countItemOnDay(left, chosenSlot!.dayIndex)
       const rightDayCount = countItemOnDay(right, chosenSlot!.dayIndex)
       const leftCoreCount = getDayCells(left, chosenSlot!.dayIndex).filter((cell) => cell?.kind === 'core').length
       const rightCoreCount = getDayCells(right, chosenSlot!.dayIndex).filter((cell) => cell?.kind === 'core').length
-      return leftDayCount - rightDayCount || (left.isCore ? leftCoreCount : 0) - (right.isCore ? rightCoreCount : 0) || left.remaining - right.remaining
+      return leftDayCount - rightDayCount
+        || (left.isCore ? leftCoreCount : 0) - (right.isCore ? rightCoreCount : 0)
+        || left.remaining - right.remaining
+        || candidateCounts.get(left)! - candidateCounts.get(right)!
     })
     const slot = { dayIndex: chosenSlot.dayIndex, startPeriod: chosenSlot.period }
     for (const item of candidates) {
-      if (item.remaining <= 0) continue
       const task = { id: `single:${item.id}`, item, duration: 1, isTest: false }
-      if (!canPlace(task, slot)) continue
       put(task, slot)
       if (fillSinglePeriods()) return true
       remove(task, slot)
@@ -934,15 +985,20 @@ function buildSchedule(
     for (const task of pending) {
       const options = candidatesFor(task)
       if (!selected || options.length < candidates.length) { selected = task; candidates = options }
-      if (!options.length) return false
+      if (!options.length) {
+        const reason = `${task.item.name}: its ${task.duration}-period block has no legal remaining placement.`
+        searchDeadEnds.set(reason, (searchDeadEnds.get(reason) ?? 0) + 1)
+        return false
+      }
     }
     if (!selected) return false
-    for (const candidate of candidates) {
-      if (!canPlace(selected, candidate)) continue
+    for (const candidate of shuffled(candidates, random)) {
       put(selected, candidate)
       assigned.add(selected.id)
+      assignedCandidates.set(selected.id, candidate)
       if (placeBlocks(assigned)) return true
       assigned.delete(selected.id)
+      assignedCandidates.delete(selected.id)
       remove(selected, candidate)
       if (exceededLimit) return false
     }
@@ -952,6 +1008,10 @@ function buildSchedule(
   if (!placeBlocks(new Set())) {
     return failure([
       exceededLimit ? `Generic constraint search reached its ${searchLimit.toLocaleString()}-node limit.` : 'No complete assignment satisfies the configured workload, block, and teacher constraints.',
+      ...(!exceededLimit ? [...searchDeadEnds.entries()]
+        .sort((left, right) => right[1] - left[1])
+        .slice(0, 5)
+        .map(([reason]) => `Most frequent search dead end: ${reason}`) : []),
       ...[...placementAlternateClashes].slice(0, 8),
       ...(reservedSections.length ? [`Candidates were checked against ${reservedSections.length} previously generated active section timetable(s) for teacher-slot clashes and duplicate complete grids.`] : []),
       ...(unavailableTeacherSlots.length ? [`Candidate placement respected ${unavailableTeacherSlots.length} saved normal-week teacher-slot restriction(s).`] : []),
