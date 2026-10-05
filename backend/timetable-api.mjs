@@ -49,7 +49,7 @@ function identityFromQuery(url) {
   return identity
 }
 
-/** Same-origin JSON endpoints backed by the Phase 7 SQLite repository. */
+/** Same-origin JSON endpoints backed by the PostgreSQL timetable repository. */
 export function createTimetableApiMiddleware(repository) {
   return async (request, response, next) => {
     const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`)
@@ -57,7 +57,7 @@ export function createTimetableApiMiddleware(repository) {
     try {
       if (request.method === 'GET' && pathname === '/timetable-versions') {
         const identity = identityFromQuery(url)
-        const versions = repository.getSavedTimetableNavigation().filter((version) =>
+        const versions = (await repository.getSavedTimetableNavigation()).filter((version) =>
           version.department === identity.department && version.year === identity.year
           && version.semester === identity.semester && version.academicYear === identity.academicYear)
         sendJson(response, 200, { versions })
@@ -66,7 +66,7 @@ export function createTimetableApiMiddleware(repository) {
 
       const versionMatch = pathname.match(/^\/timetable-versions\/([^/]+)(?:\/(lock|unlock))?$/)
       if (versionMatch && request.method === 'GET' && !versionMatch[2]) {
-        const savedVersion = repository.getSavedTimetableVersion(decodeURIComponent(versionMatch[1]))
+        const savedVersion = await repository.getSavedTimetableVersion(decodeURIComponent(versionMatch[1]))
         if (!savedVersion) {
           sendJson(response, 404, { error: 'That saved timetable version was not found.' })
           return
@@ -78,14 +78,14 @@ export function createTimetableApiMiddleware(repository) {
       if (versionMatch && request.method === 'POST' && versionMatch[2]) {
         const versionId = decodeURIComponent(versionMatch[1])
         const status = versionMatch[2] === 'lock' ? 'LOCKED' : 'SAVED'
-        const savedTimetableVersion = repository.setSavedTimetableVersionStatus({ versionId, status })
-        const savedVersion = repository.getSavedTimetableNavigation().find((version) => version.versionId === versionId)
+        const savedTimetableVersion = await repository.setSavedTimetableVersionStatus({ versionId, status })
+        const savedVersion = (await repository.getSavedTimetableNavigation()).find((version) => version.versionId === versionId)
         sendJson(response, 200, { versionId, savedTimetableVersion, savedVersion })
         return
       }
 
       if (request.method === 'DELETE' && versionMatch && !versionMatch[2]) {
-        const deletedVersion = repository.deleteSavedTimetableVersion({
+        const deletedVersion = await repository.deleteSavedTimetableVersion({
           versionId: decodeURIComponent(versionMatch[1]),
         })
         sendJson(response, 200, { deletedVersion })
@@ -93,7 +93,7 @@ export function createTimetableApiMiddleware(repository) {
       }
 
       if (request.method === 'GET' && pathname === '/saved-timetables') {
-        sendJson(response, 200, { timetables: repository.getSavedTimetableNavigation() })
+        sendJson(response, 200, { timetables: await repository.getSavedTimetableNavigation() })
         return
       }
 
@@ -105,7 +105,7 @@ export function createTimetableApiMiddleware(repository) {
           sendJson(response, 400, { error: 'Timetable identity, candidate sections and staff identities are required for the saved-occupancy check.' })
           return
         }
-        const conflicts = repository.getTeacherGenerationOccupancyConflicts({ identity, sections, staff })
+        const conflicts = await repository.getTeacherGenerationOccupancyConflicts({ identity, sections, staff })
         sendJson(response, 200, { conflicts })
         return
       }
@@ -119,7 +119,7 @@ export function createTimetableApiMiddleware(repository) {
           sendJson(response, 400, { error: 'Timetable identity and candidate staff identities are required for the saved-occupancy lookup.' })
           return
         }
-        const occupancy = repository.getTeacherUnavailableOccupancy({ identity, staff })
+        const occupancy = await repository.getTeacherUnavailableOccupancy({ identity, staff })
         sendJson(response, 200, occupancy)
         return
       }
@@ -217,37 +217,41 @@ export function createTimetableApiMiddleware(repository) {
           }
         }
 
-        let configurationId = repository.getTimetableConfigurationByIdentity(identity)
-        if (!configurationId) configurationId = repository.createTimetableConfiguration(configuration)
+        const saveResult = await repository.withSaveTransaction(async () => {
+          let configurationId = await repository.getTimetableConfigurationByIdentity(identity)
+          if (!configurationId) configurationId = await repository.createTimetableConfiguration(configuration)
 
-        // A retried request after a lost response is safe and cannot make a
-        // duplicate version for the same generation.
-        const existing = repository.getSavedGeneration(generationId, configurationId)
-        const existingSectionIds = new Set((existing?.sections ?? []).map((section) => section.sectionId))
-        if (existing && [...requiredSectionIds].some((sectionId) => !existingSectionIds.has(sectionId))) {
-          sendJson(response, 409, { error: 'This generation has saved versions for only some sections and cannot be safely retried. Generate and save a new version.' })
-          return
-        }
-        if (existing?.versions.some((version) => version.status === 'LOCKED')) {
-          sendJson(response, 409, { error: 'This timetable version is locked and cannot be overwritten. Generate and save a new version instead.' })
-          return
-        }
-        if (!existing) {
-          repository.saveGeneratedTimetableData({
-            configurationId,
-            generationId,
-            sections,
-            validation,
-            setupSnapshot,
-            staff: configuration.staff,
-          })
-        }
-        const versions = repository.getSavedGenerationSummaries(identity)
-        const savedVersion = versions.find((version) => version.generationId === generationId)
-        const timetableVersions = repository.getSavedTimetableNavigation().filter((version) =>
-          version.department === identity.department && version.year === identity.year
-          && version.semester === identity.semester && version.academicYear === identity.academicYear)
-        sendJson(response, existing ? 200 : 201, { configurationId, generationId, savedVersion, versions, timetableVersions })
+          // A retried request after a lost response is safe and cannot make a
+          // duplicate version for the same generation.
+          const existing = await repository.getSavedGeneration(generationId, configurationId)
+          const existingSectionIds = new Set((existing?.sections ?? []).map((section) => section.sectionId))
+          if (existing && [...requiredSectionIds].some((sectionId) => !existingSectionIds.has(sectionId))) {
+            return { statusCode: 409, payload: { error: 'This generation has saved versions for only some sections and cannot be safely retried. Generate and save a new version.' } }
+          }
+          if (existing?.versions.some((version) => version.status === 'LOCKED')) {
+            return { statusCode: 409, payload: { error: 'This timetable version is locked and cannot be overwritten. Generate and save a new version instead.' } }
+          }
+          if (!existing) {
+            await repository.saveGeneratedTimetableData({
+              configurationId,
+              generationId,
+              sections,
+              validation,
+              setupSnapshot,
+              staff: configuration.staff,
+            })
+          }
+          const versions = await repository.getSavedGenerationSummaries(identity)
+          const savedVersion = versions.find((version) => version.generationId === generationId)
+          const timetableVersions = (await repository.getSavedTimetableNavigation()).filter((version) =>
+            version.department === identity.department && version.year === identity.year
+            && version.semester === identity.semester && version.academicYear === identity.academicYear)
+          return {
+            statusCode: existing ? 200 : 201,
+            payload: { configurationId, generationId, savedVersion, versions, timetableVersions },
+          }
+        })
+        sendJson(response, saveResult.statusCode, saveResult.payload)
         return
       }
 

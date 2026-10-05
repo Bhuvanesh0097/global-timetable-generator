@@ -47,38 +47,42 @@ export interface SavedGeneration {
 }
 
 export class TimetableRepository {
-  close(): void
-  createTimetableConfiguration(configuration: GenericScheduleConfig): string
-  getTimetableConfigurationByIdentity(identity: { department: string; year: string; semester: string; academicYear: string; configurationVersion?: number }): string | null
-  getSavedGenerationSummaries(identity: { department: string; year: string; semester: string; academicYear: string }): SavedVersionSummary[]
-  getSavedTimetableNavigation(): SavedTimetableNavigationEntry[]
-  deleteSavedTimetableVersion(input: { versionId: string }): {
+  close(): Promise<void>
+  withSaveTransaction<T>(work: () => Promise<T>): Promise<T>
+  createTimetableConfiguration(configuration: GenericScheduleConfig): Promise<string>
+  getTimetableConfiguration(configurationId: string): Promise<GenericScheduleConfig | null>
+  getSections(configurationId: string): Promise<Array<{ id: string; name: string; classAdvisorId?: string }>>
+  getTeachers(configurationId?: string): Promise<Array<{ id: string; canonicalName: string; normalizedName: string; createdAt: Date; updatedAt: Date }>>
+  getTimetableConfigurationByIdentity(identity: { department: string; year: string; semester: string; academicYear: string; configurationVersion?: number }): Promise<string | null>
+  getSavedGenerationSummaries(identity: { department: string; year: string; semester: string; academicYear: string }): Promise<SavedVersionSummary[]>
+  getSavedTimetableNavigation(): Promise<SavedTimetableNavigationEntry[]>
+  deleteSavedTimetableVersion(input: { versionId: string }): Promise<{
     versionId: string
     generationId: string
     versionNumber: number
     sectionName: string
     deletedCellCount: number
     activeVersionId: string | null
-  }
-  getSavedTimetableVersion(versionId: string): (SavedGeneration & { versionId: string; sectionName: string }) | null
-  getSavedGeneration(generationId: string, configurationId: string): SavedGeneration | null
+  }>
+  getSavedTimetableVersion(versionId: string): Promise<(SavedGeneration & { versionId: string; sectionName: string }) | null>
+  getSavedGeneration(generationId: string, configurationId: string): Promise<SavedGeneration | null>
   getTeacherOccupancyConflicts(input: {
     identity: { department: string; year: string; semester: string; academicYear: string }
     sections: SavedGeneration['sections']
     staff?: Array<{ id: string; name?: string; canonicalName?: string }>
-  }): Array<{
+  }): Promise<Array<{
     teacherId: string
     teacherName: string
     day: string
     period: number
     existing: { department: string; year: string; semester: string; section: string; subject: string }
     candidate: { department: string; year: string; semester: string; section: string; subject: string }
-  }>
+  }>>
   getTeacherGenerationOccupancyConflicts(input: {
     identity: { department: string; year: string; semester: string; academicYear: string }
     sections: SavedGeneration['sections']
     staff?: Array<{ id: string; name?: string; canonicalName?: string }>
-  }): Array<{
+  }): Promise<Array<{
     teacherId: string
     teacherName: string
     day: string
@@ -86,21 +90,21 @@ export class TimetableRepository {
     week?: 'alternate'
     existing: { department: string; year: string; semester: string; section: string; subject: string }
     candidate: { department: string; year: string; semester: string; section: string; subject: string }
-  }>
+  }>>
   getTeacherUnavailableSlots(input: {
     identity: { department: string; year: string; semester: string; academicYear: string }
     staff?: Array<{ id: string; name?: string; canonicalName?: string }>
-  }): Array<{
+  }): Promise<Array<{
     teacherId: string
     day: string
     period: number
     teacherName: string
     existing: { department: string; year: string; semester: string; section: string; subject: string }
-  }>
+  }>>
   getTeacherUnavailableOccupancy(input: {
     identity: { department: string; year: string; semester: string; academicYear: string }
     staff?: Array<{ id: string; name?: string; canonicalName?: string }>
-  }): {
+  }): Promise<{
     unavailableSlots: Array<{
       teacherId: string
       day: string
@@ -115,9 +119,9 @@ export class TimetableRepository {
       teacherName: string
       existing: { department: string; year: string; semester: string; section: string; subject: string }
     }>
-  }
-  setSavedTimetableVersionStatus(input: { versionId: string; status: 'SAVED' | 'LOCKED' }): (SavedGeneration & { versionId: string; sectionName: string }) | null
-  saveGeneratedTimetableData(input: { configurationId: string; generationId: string; sections: SavedGeneration['sections']; validation: unknown; setupSnapshot: TimetableSetup; staff?: GenericScheduleConfig['staff'] }): unknown[]
+  }>
+  setSavedTimetableVersionStatus(input: { versionId: string; status: 'SAVED' | 'LOCKED' }): Promise<(SavedGeneration & { versionId: string; sectionName: string }) | null>
+  saveGeneratedTimetableData(input: { configurationId: string; generationId: string; sections: SavedGeneration['sections']; validation: unknown; setupSnapshot: TimetableSetup; staff?: GenericScheduleConfig['staff'] }): Promise<unknown[]>
 }
 
-export function openTimetableRepository(options?: { filename?: string }): TimetableRepository
+export function openTimetableRepository(options?: { databaseUrl?: string; schema?: string }): Promise<TimetableRepository>

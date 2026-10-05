@@ -1,13 +1,18 @@
 import { randomUUID } from 'node:crypto'
-import { mkdirSync, readFileSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
-import { DatabaseSync } from 'node:sqlite'
+import { AsyncLocalStorage } from 'node:async_hooks'
+import { readFile } from 'node:fs/promises'
+import { Pool, types } from 'pg'
 
-const schemaUrl = new URL('./migrations/001_initial_schema.sql', import.meta.url)
-const savedVersionMigrationUrl = new URL('./migrations/002_saved_version_snapshots.sql', import.meta.url)
-const lockedVersionMigrationUrl = new URL('./migrations/003_locked_version_guards.sql', import.meta.url)
+const migrations = [
+  { version: 1, name: 'initial_schema', url: new URL('./migrations/001_initial_schema.sql', import.meta.url) },
+  { version: 2, name: 'saved_version_snapshots', url: new URL('./migrations/002_saved_version_snapshots.sql', import.meta.url) },
+  { version: 3, name: 'locked_version_guards', url: new URL('./migrations/003_locked_version_guards.sql', import.meta.url) },
+]
 const validStatuses = new Set(['DRAFT', 'SAVED', 'LOCKED'])
 const supportedDays = new Set(['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'])
+const migrationLockId = 716_204_817
+const saveLockId = 716_204_818
+types.setTypeParser(20, (value) => Number(value))
 
 function normalizedTeacherName(name) {
   return String(name ?? '').normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase()
@@ -22,14 +27,64 @@ function serialize(value, fallback = '{}') {
 }
 
 function withTransaction(database, work) {
-  database.exec('BEGIN IMMEDIATE')
-  try {
-    const result = work()
-    database.exec('COMMIT')
-    return result
-  } catch (error) {
-    database.exec('ROLLBACK')
-    throw error
+  if (database.transactionContext.getStore()) return work()
+  return database.transaction(async (client) => database.transactionContext.run(client, work))
+}
+
+function postgresParameters(sql, parameters) {
+  let index = 0
+  const query = sql.replace(/\?/g, () => `$${++index}`)
+  if (index !== parameters.length) {
+    throw new Error(`PostgreSQL query expected ${index} parameters but received ${parameters.length}.`)
+  }
+  return { query, values: parameters }
+}
+
+class PostgresDatabase {
+  constructor(pool) {
+    this.pool = pool
+    this.transactionContext = new AsyncLocalStorage()
+  }
+
+  async query(sql, values = []) {
+    const { query, values: parameters } = sql.includes('?')
+      ? postgresParameters(sql, values)
+      : { query: sql, values }
+    const client = this.transactionContext.getStore() ?? this.pool
+    return client.query(query, parameters)
+  }
+
+  prepare(sql) {
+    const ignoreConflicts = /\bINSERT\s+OR\s+IGNORE\s+INTO\b/i.test(sql)
+    const statement = sql.replace(/\bINSERT\s+OR\s+IGNORE\s+INTO\b/i, 'INSERT INTO').trim()
+    const query = ignoreConflicts ? `${statement.replace(/;$/, '')} ON CONFLICT DO NOTHING` : statement
+    return {
+      all: async (...parameters) => (await this.query(query, parameters)).rows,
+      get: async (...parameters) => (await this.query(query, parameters)).rows[0],
+      run: async (...parameters) => {
+        const result = await this.query(query, parameters)
+        return { changes: result.rowCount }
+      },
+    }
+  }
+
+  async transaction(work) {
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      const result = await work(client)
+      await client.query('COMMIT')
+      return result
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
+  }
+
+  async close() {
+    await this.pool.end()
   }
 }
 
@@ -140,49 +195,54 @@ function invalidTimetableData(message) {
   return error
 }
 
-/** Opens a persistent SQLite database and applies all pending versioned migrations. */
-export function openTimetableRepository({
-  filename = process.env.TIMETABLE_DATABASE_PATH || resolve(process.cwd(), 'data', 'mvit-timetable.sqlite'),
-} = {}) {
-  if (filename !== ':memory:') mkdirSync(dirname(resolve(filename)), { recursive: true })
-  const database = new DatabaseSync(filename)
-  database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;')
-  let currentSchemaVersion = database.prepare('PRAGMA user_version').get().user_version
-  if (currentSchemaVersion > 3) {
-    database.close()
-    throw new Error(`Timetable database schema ${currentSchemaVersion} is newer than this application supports.`)
-  }
-  if (currentSchemaVersion < 1) {
-    database.exec(readFileSync(schemaUrl, 'utf8'))
-    database.exec('PRAGMA user_version = 1')
-    currentSchemaVersion = 1
-  }
-  if (currentSchemaVersion < 2) {
-    database.exec('BEGIN EXCLUSIVE')
+/** Opens the shared PostgreSQL database and applies pending versioned migrations. */
+export async function openTimetableRepository({ databaseUrl = process.env.DATABASE_URL, schema } = {}) {
+  if (!databaseUrl) throw new Error('DATABASE_URL is required to connect to timetable storage.')
+  if (schema && !/^mvit_test_[a-f0-9]+$/.test(schema)) throw new Error('PostgreSQL schema name is invalid.')
+  if (schema) {
+    const adminPool = new Pool({ connectionString: databaseUrl, max: 1, connectionTimeoutMillis: 10_000 })
     try {
-      database.exec(readFileSync(savedVersionMigrationUrl, 'utf8'))
-      database.exec('PRAGMA user_version = 2')
-      database.exec('COMMIT')
-      currentSchemaVersion = 2
-    } catch (error) {
-      database.exec('ROLLBACK')
-      database.close()
-      throw error
+      await adminPool.query(`CREATE SCHEMA IF NOT EXISTS "${schema}"`)
+    } finally {
+      await adminPool.end()
     }
   }
-  if (currentSchemaVersion < 3) {
-    database.exec('BEGIN EXCLUSIVE')
-    try {
-      database.exec(readFileSync(lockedVersionMigrationUrl, 'utf8'))
-      database.exec('PRAGMA user_version = 3')
-      database.exec('COMMIT')
-    } catch (error) {
-      database.exec('ROLLBACK')
-      database.close()
-      throw error
-    }
+  const database = new PostgresDatabase(new Pool({
+    connectionString: databaseUrl,
+    max: 10,
+    idleTimeoutMillis: 30_000,
+    connectionTimeoutMillis: 10_000,
+    ...(schema ? { options: `-c search_path=${schema}` } : {}),
+  }))
+  try {
+    await database.transaction(async (client) => {
+      await client.query('SELECT pg_advisory_xact_lock($1)', [migrationLockId])
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+          version INTEGER PRIMARY KEY,
+          name TEXT NOT NULL,
+          applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+      `)
+      const { rows } = await client.query('SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1')
+      const currentVersion = rows[0]?.version ?? 0
+      const latestVersion = migrations.at(-1).version
+      if (currentVersion > latestVersion) {
+        throw new Error(`Timetable database schema ${currentVersion} is newer than this application supports.`)
+      }
+      for (const migration of migrations.filter(({ version }) => version > currentVersion)) {
+        await client.query(await readFile(migration.url, 'utf8'))
+        await client.query(
+          'INSERT INTO schema_migrations (version, name) VALUES ($1, $2)',
+          [migration.version, migration.name],
+        )
+      }
+    })
+    return new TimetableRepository(database)
+  } catch (error) {
+    await database.close()
+    throw error
   }
-  return new TimetableRepository(database)
 }
 
 /** Node-only persistence services. This repository has no dependency on the scheduler or UI. */
@@ -192,10 +252,17 @@ export class TimetableRepository {
   }
 
   close() {
-    this.database.close()
+    return this.database.close()
   }
 
-  createTimetableConfiguration(configuration) {
+  withSaveTransaction(work) {
+    return withTransaction(this.database, async () => {
+      await this.database.query('SELECT pg_advisory_xact_lock($1)', [saveLockId])
+      return work()
+    })
+  }
+
+  async createTimetableConfiguration(configuration) {
     const id = configuration.id || randomUUID()
     const configurationVersion = configuration.configurationVersion ?? 1
     for (const field of ['department', 'year', 'semester', 'academicYear']) {
@@ -205,8 +272,8 @@ export class TimetableRepository {
       throw new Error('Configuration version must be a positive whole number.')
     }
 
-    return withTransaction(this.database, () => {
-      this.database.prepare(`
+    return withTransaction(this.database, async () => {
+      await this.database.prepare(`
         INSERT INTO timetable_configurations
           (id, department, year, semester, academic_year, configuration_version, rules_json, candidate_count, extra_json)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -238,8 +305,8 @@ export class TimetableRepository {
         if (!teacher?.id) continue
         const canonicalName = String(teacher.canonicalName ?? teacher.name ?? '').trim()
         if (!canonicalName) throw new Error(`Staff ID ${teacher.id} needs a canonical name.`)
-        insertTeacher.run(teacher.id, canonicalName, normalizedTeacherName(canonicalName))
-        if (!knownTeacherIds.has(teacher.id)) insertConfigurationTeacher.run(id, teacher.id)
+        await insertTeacher.run(teacher.id, canonicalName, normalizedTeacherName(canonicalName))
+        if (!knownTeacherIds.has(teacher.id)) await insertConfigurationTeacher.run(id, teacher.id)
         knownTeacherIds.add(teacher.id)
       }
 
@@ -254,16 +321,16 @@ export class TimetableRepository {
         if (!sourceId || !sectionName) throw new Error('Each configured section needs an ID and a name.')
         const databaseSectionId = randomUUID()
         const advisorId = section.classAdvisorId || null
-        insertSection.run(databaseSectionId, id, sourceId, sectionName, advisorId)
+        await insertSection.run(databaseSectionId, id, sourceId, sectionName, advisorId)
         sectionRows.set(sourceId, databaseSectionId)
       }
 
       const insertItem = this.database.prepare(`
         INSERT INTO configuration_items
-          (id, configuration_id, source_id, item_type, code, name, weekly_periods, block_duration, enabled, allowed_start_periods_json, source_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          (id, configuration_id, source_id, item_type, code, name, weekly_periods, block_duration, enabled, allowed_start_periods_json, source_json, item_order)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
-      for (const [itemType, item] of itemDefinitions(configuration)) {
+      for (const [itemOrder, [itemType, item]] of itemDefinitions(configuration).entries()) {
         const sourceId = String(item.id ?? '').trim()
         if (!sourceId) throw new Error(`${item.name || itemType} needs a stable ID.`)
         const databaseItemId = randomUUID()
@@ -271,7 +338,7 @@ export class TimetableRepository {
         const blockDuration = item.blockDuration ?? null
         const allowedStarts = item.allowedStartPeriods ?? null
         const sourceJson = { ...item }
-        insertItem.run(
+        await insertItem.run(
           databaseItemId,
           id,
           sourceId,
@@ -283,6 +350,7 @@ export class TimetableRepository {
           item.enabled === false ? 0 : 1,
           allowedStarts ? serialize(allowedStarts) : null,
           serialize(sourceJson),
+          itemOrder,
         )
         for (const assignment of item.teacherAssignments ?? []) {
           const databaseSectionId = sectionRows.get(assignment.sectionId)
@@ -291,7 +359,7 @@ export class TimetableRepository {
           if (!teacherId) continue
           // The relational index is one teacher per item/section. Preserve any
           // richer source assignment structure in source_json for exact reload.
-          this.database.prepare(`
+          await this.database.prepare(`
             INSERT OR IGNORE INTO item_teacher_assignments
               (configuration_id, item_id, section_id, teacher_id)
             VALUES (?, ?, ?, ?)
@@ -302,12 +370,12 @@ export class TimetableRepository {
     })
   }
 
-  getTimetableConfiguration(configurationId) {
-    const row = this.database.prepare('SELECT * FROM timetable_configurations WHERE id = ?').get(configurationId)
+  async getTimetableConfiguration(configurationId) {
+    const row = await this.database.prepare('SELECT * FROM timetable_configurations WHERE id = ?').get(configurationId)
     if (!row) return null
-    const sections = this.getSections(configurationId)
-    const staff = this.getTeachers(configurationId).map(({ id, canonicalName }) => ({ id, name: canonicalName }))
-    const assignments = this.database.prepare(`
+    const sections = await this.getSections(configurationId)
+    const staff = (await this.getTeachers(configurationId)).map(({ id, canonicalName }) => ({ id, name: canonicalName }))
+    const assignments = await this.database.prepare(`
       SELECT assignments.item_id, sections.source_id AS section_source_id, assignments.teacher_id
       FROM item_teacher_assignments assignments
       JOIN sections ON sections.id = assignments.section_id
@@ -319,8 +387,8 @@ export class TimetableRepository {
       if (!assignmentMap.has(assignment.item_id)) assignmentMap.set(assignment.item_id, [])
       assignmentMap.get(assignment.item_id).push({ sectionId: assignment.section_source_id, teacherId: assignment.teacher_id ?? '' })
     }
-    const rows = this.database.prepare(`
-      SELECT * FROM configuration_items WHERE configuration_id = ? ORDER BY item_type, rowid
+    const rows = await this.database.prepare(`
+      SELECT * FROM configuration_items WHERE configuration_id = ? ORDER BY item_type, item_order
     `).all(configurationId)
     const groups = new Map()
     for (const item of rows) {
@@ -352,14 +420,14 @@ export class TimetableRepository {
     }
   }
 
-  getSections(configurationId) {
-    return this.database.prepare(`
+  async getSections(configurationId) {
+    return (await this.database.prepare(`
       SELECT source_id, section_name, class_advisor_teacher_id
       FROM sections WHERE configuration_id = ? ORDER BY section_name
-    `).all(configurationId).map(rowToSection)
+    `).all(configurationId)).map(rowToSection)
   }
 
-  getTeachers(configurationId) {
+  async getTeachers(configurationId) {
     const rows = configurationId
       ? this.database.prepare(`
           SELECT teachers.id, teachers.canonical_name, teachers.normalized_name, teachers.created_at, teachers.updated_at
@@ -372,7 +440,7 @@ export class TimetableRepository {
           SELECT id, canonical_name, normalized_name, created_at, updated_at
           FROM teachers ORDER BY normalized_name, id
         `).all()
-    return rows.map((teacher) => ({
+    return (await rows).map((teacher) => ({
       id: teacher.id,
       canonicalName: teacher.canonical_name,
       normalizedName: teacher.normalized_name,
@@ -381,20 +449,20 @@ export class TimetableRepository {
     }))
   }
 
-  getTimetableConfigurationByIdentity({ department, year, semester, academicYear, configurationVersion = 1 }) {
-    const row = this.database.prepare(`
+  async getTimetableConfigurationByIdentity({ department, year, semester, academicYear, configurationVersion = 1 }) {
+    const row = await this.database.prepare(`
       SELECT id FROM timetable_configurations
       WHERE department = ? AND year = ? AND semester = ? AND academic_year = ? AND configuration_version = ?
     `).get(department, year, semester, academicYear, configurationVersion)
     return row?.id ?? null
   }
 
-  saveGeneratedTimetableData({ configurationId, generationId = randomUUID(), sections, validation = {}, setupSnapshot = {}, staff }) {
-    const configuration = this.database.prepare('SELECT * FROM timetable_configurations WHERE id = ?').get(configurationId)
+  async saveGeneratedTimetableData({ configurationId, generationId = randomUUID(), sections, validation = {}, setupSnapshot = {}, staff }) {
+    const configuration = await this.database.prepare('SELECT * FROM timetable_configurations WHERE id = ?').get(configurationId)
     if (!configuration) throw new Error(`Timetable configuration ${configurationId} does not exist.`)
     if (typeof generationId !== 'string' || !generationId.trim()) throw invalidTimetableData('A generated timetable needs a non-empty generation ID.')
     if (!Array.isArray(sections) || sections.length === 0) throw new Error('At least one generated section is required.')
-    const candidateStaff = staff ?? this.getTeachers(configurationId)
+    const candidateStaff = staff ?? await this.getTeachers(configurationId)
     const candidateStaffById = new Map()
     for (const teacher of candidateStaff) {
       const teacherId = String(teacher?.id ?? '').trim()
@@ -442,8 +510,9 @@ export class TimetableRepository {
       if (occupiedCells !== 48) throw invalidTimetableData(`Section ${generatedSection.sectionId} must contain exactly 48 timetable periods.`)
     }
 
-    return withTransaction(this.database, () => {
-      const occupancyConflicts = this.getTeacherGenerationOccupancyConflicts({
+    return withTransaction(this.database, async () => {
+      await this.database.query('SELECT pg_advisory_xact_lock($1)', [saveLockId])
+      const occupancyConflicts = await this.getTeacherGenerationOccupancyConflicts({
         identity: {
           department: configuration.department,
           year: configuration.year,
@@ -451,7 +520,7 @@ export class TimetableRepository {
           academicYear: configuration.academic_year,
         },
         sections,
-        staff: staff ?? this.getTeachers(configurationId),
+        staff: staff ?? await this.getTeachers(configurationId),
       })
       if (occupancyConflicts.length) {
         const error = new Error(`Saved timetable teacher occupancy conflict:\n${conflictMessage(occupancyConflicts)}`)
@@ -460,11 +529,11 @@ export class TimetableRepository {
         throw error
       }
 
-      const sectionRows = this.database.prepare(`
+      const sectionRows = await this.database.prepare(`
         SELECT id, source_id, section_name FROM sections WHERE configuration_id = ?
       `).all(configurationId)
       const sectionBySourceId = new Map(sectionRows.map((section) => [section.source_id, section]))
-      const configItems = this.database.prepare(`
+      const configItems = await this.database.prepare(`
         SELECT id, source_id, item_type FROM configuration_items WHERE configuration_id = ?
       `).all(configurationId)
       const upsertTeacher = this.database.prepare(`
@@ -482,8 +551,8 @@ export class TimetableRepository {
       for (const teacher of candidateStaff) {
         const teacherId = String(teacher?.id ?? '').trim()
         const canonicalName = candidateStaffById.get(teacherId)
-        upsertTeacher.run(teacherId, canonicalName, normalizedTeacherName(canonicalName))
-        linkTeacher.run(configurationId, teacherId)
+        await upsertTeacher.run(teacherId, canonicalName, normalizedTeacherName(canonicalName))
+        await linkTeacher.run(configurationId, teacherId)
         staffNames.set(teacherId, canonicalName)
       }
       const result = []
@@ -499,7 +568,8 @@ export class TimetableRepository {
         JOIN generated_timetables timetables ON timetables.id = versions.timetable_id
         WHERE timetables.configuration_id = ? AND versions.generation_id = ? LIMIT 1
       `).get(configurationId, generationId)
-      if (alreadySaved) throw new Error(`Generation ${generationId} has already been saved.`)
+      const existingGeneration = await alreadySaved
+      if (existingGeneration) throw new Error(`Generation ${generationId} has already been saved.`)
 
       const insertVersion = this.database.prepare(`
         INSERT INTO timetable_versions
@@ -531,17 +601,18 @@ export class TimetableRepository {
             throw invalidTimetableData(`Generated Section ${generatedSection.sectionId} has mismatched ${field} metadata.`)
           }
         }
-        let timetable = findTimetable.get(configurationId, section.id)
+        let timetable = await findTimetable.get(configurationId, section.id)
         if (!timetable) {
           const id = randomUUID()
-          insertTimetable.run(id, configurationId, section.id, generationId)
-          timetable = findTimetable.get(configurationId, section.id)
+          await insertTimetable.run(id, configurationId, section.id, generationId)
+          timetable = await findTimetable.get(configurationId, section.id)
         }
         const versionNumber = this.database.prepare(
           'SELECT COALESCE(MAX(version_number), 0) + 1 AS next_version FROM timetable_versions WHERE timetable_id = ?',
-        ).get(timetable.id).next_version
+        ).get(timetable.id)
+        const nextVersion = (await versionNumber).next_version
         const versionId = randomUUID()
-        insertVersion.run(versionId, timetable.id, versionNumber, generationId, serialize(validation), serialize(setupSnapshot))
+        await insertVersion.run(versionId, timetable.id, nextVersion, generationId, serialize(validation), serialize(setupSnapshot))
 
         for (const [day, dayCells] of Object.entries(generatedSection.schedule ?? {})) {
           if (!supportedDays.has(day)) throw new Error(`Unsupported timetable day ${day}.`)
@@ -566,7 +637,7 @@ export class TimetableRepository {
               ? 'PLACEMENT'
               : cellType
             const isActivity = cell.kind === 'activity'
-            insertCell.run(
+            await insertCell.run(
               randomUUID(), versionId, linkedItem?.id ?? null, cell.itemId ?? null, persistedCellType, day, period,
               isActivity ? null : (cell.code || null),
               isActivity ? null : (cell.name || null),
@@ -584,15 +655,15 @@ export class TimetableRepository {
             )
           }
         }
-        updateActive.run(generationId, versionId, timetable.id)
-        result.push(this.getActiveVersion(timetable.id))
+        await updateActive.run(generationId, versionId, timetable.id)
+        result.push(await this.getActiveVersion(timetable.id))
       }
       return result
     })
   }
 
-  getTeacherOccupancyConflicts({ identity, sections, staff = [] }) {
-    const existingOccupancy = this.database.prepare(`
+  async getTeacherOccupancyConflicts({ identity, sections, staff = [] }) {
+    const existingOccupancy = await this.database.prepare(`
       SELECT cells.teacher_id, cells.teacher_name_snapshot, cells.day, cells.period,
         cells.department, cells.year, cells.semester, cells.section_name,
         COALESCE(cells.activity_name, cells.subject_name, cells.subject_code, 'Unlabeled activity') AS subject,
@@ -654,8 +725,8 @@ export class TimetableRepository {
     return conflicts
   }
 
-  getTeacherGenerationOccupancyConflicts({ identity, sections, staff = [] }) {
-    const { unavailableSlots, alternateWeekUnavailableSlots } = this.getTeacherUnavailableOccupancy({ identity, staff })
+  async getTeacherGenerationOccupancyConflicts({ identity, sections, staff = [] }) {
+    const { unavailableSlots, alternateWeekUnavailableSlots } = await this.getTeacherUnavailableOccupancy({ identity, staff })
     const normalBySlotAndTeacher = new Map(unavailableSlots.map((slot) => [`${slot.teacherId}|${slot.day}|${slot.period}`, slot]))
     const alternateBySlotAndTeacher = new Map(alternateWeekUnavailableSlots.map((slot) => [`${slot.teacherId}|${slot.day}|${slot.period}`, slot]))
     const teacherNames = new Map(staff.map((teacher) => [teacher.id, teacher.canonicalName ?? teacher.name ?? teacher.id]))
@@ -696,12 +767,12 @@ export class TimetableRepository {
     return conflicts
   }
 
-  getTeacherUnavailableSlots({ identity, staff = [] }) {
-    return this.getTeacherUnavailableOccupancy({ identity, staff }).unavailableSlots
+  async getTeacherUnavailableSlots({ identity, staff = [] }) {
+    return (await this.getTeacherUnavailableOccupancy({ identity, staff })).unavailableSlots
   }
 
-  getTeacherUnavailableOccupancy({ identity, staff = [] }) {
-    const existingOccupancy = this.database.prepare(`
+  async getTeacherUnavailableOccupancy({ identity, staff = [] }) {
+    const existingOccupancy = await this.database.prepare(`
       SELECT versions.id AS version_id, versions.setup_snapshot_json,
         cells.teacher_id, cells.teacher_name_snapshot, cells.day, cells.period, cells.cell_type, cells.block_id,
         cells.department, cells.year, cells.semester, cells.section_name,
@@ -842,8 +913,8 @@ export class TimetableRepository {
     }
   }
 
-  getTimetableById(timetableId) {
-    const row = this.database.prepare(`
+  async getTimetableById(timetableId) {
+    const row = await this.database.prepare(`
       SELECT timetables.*, sections.section_name
       FROM generated_timetables timetables
       JOIN sections ON sections.id = timetables.section_id
@@ -851,19 +922,19 @@ export class TimetableRepository {
     `).get(timetableId)
     if (!row) return null
     const timetable = timetableRow(row)
-    return { ...timetable, activeVersion: this.getActiveVersion(timetableId) }
+    return { ...timetable, activeVersion: await this.getActiveVersion(timetableId) }
   }
 
-  getTimetableVersions(timetableId) {
-    return this.database.prepare(`
+  async getTimetableVersions(timetableId) {
+    return (await this.database.prepare(`
       SELECT versions.*, (SELECT COUNT(*) FROM timetable_cells cells WHERE cells.timetable_version_id = versions.id) AS cell_count
       FROM timetable_versions versions WHERE versions.timetable_id = ?
       ORDER BY versions.version_number DESC
-    `).all(timetableId).map(versionRow)
+    `).all(timetableId)).map(versionRow)
   }
 
-  getSavedTimetableNavigation() {
-    return this.database.prepare(`
+  async getSavedTimetableNavigation() {
+    return (await this.database.prepare(`
       SELECT versions.id AS version_id, versions.generation_id, versions.version_number, versions.status,
         versions.created_at, versions.locked_at, configurations.department,
         configurations.year, configurations.semester, configurations.academic_year,
@@ -878,7 +949,7 @@ export class TimetableRepository {
       ORDER BY configurations.department, configurations.year,
         configurations.semester, sections.section_name, versions.version_number DESC,
         versions.created_at DESC
-    `).all().map((row) => ({
+    `).all()).map((row) => ({
       versionId: row.version_id,
       generationId: row.generation_id,
       versionNumber: row.version_number,
@@ -896,9 +967,9 @@ export class TimetableRepository {
     }))
   }
 
-  deleteSavedTimetableVersion({ versionId }) {
-    return withTransaction(this.database, () => {
-      const version = this.database.prepare(`
+  async deleteSavedTimetableVersion({ versionId }) {
+    return withTransaction(this.database, async () => {
+      const version = await this.database.prepare(`
         SELECT versions.id, versions.timetable_id, versions.generation_id,
           versions.version_number, versions.status,
           sections.section_name, timetables.active_version_id
@@ -911,25 +982,25 @@ export class TimetableRepository {
       if (version.status === 'LOCKED') throw new Error('Locked timetable versions cannot be deleted. Unlock the version first.')
       if (version.status !== 'SAVED') throw new Error('Only SAVED timetable versions can be deleted.')
 
-      const cellCount = this.database.prepare(
+      const cellCount = await this.database.prepare(
         'SELECT COUNT(*) AS count FROM timetable_cells WHERE timetable_version_id = ?',
       ).get(versionId).count
       let activeVersionId = version.active_version_id
       if (version.active_version_id === versionId) {
-        const fallback = this.database.prepare(`
+        const fallback = await this.database.prepare(`
           SELECT id, generation_id FROM timetable_versions
           WHERE timetable_id = ? AND id <> ? AND status IN ('SAVED', 'LOCKED')
           ORDER BY version_number DESC, created_at DESC, id DESC LIMIT 1
         `).get(version.timetable_id, versionId)
         activeVersionId = fallback?.id ?? null
-        this.database.prepare(`
+        await this.database.prepare(`
           UPDATE generated_timetables
           SET active_version_id = ?, generation_id = COALESCE(?, generation_id), updated_at = CURRENT_TIMESTAMP
           WHERE id = ?
         `).run(activeVersionId, fallback?.generation_id ?? null, version.timetable_id)
       }
 
-      this.database.prepare('DELETE FROM timetable_versions WHERE id = ?').run(versionId)
+      await this.database.prepare('DELETE FROM timetable_versions WHERE id = ?').run(versionId)
       return {
         versionId,
         generationId: version.generation_id,
@@ -941,8 +1012,8 @@ export class TimetableRepository {
     })
   }
 
-  getSavedGenerationSummaries({ department, year, semester, academicYear }) {
-    const rows = this.database.prepare(`
+  async getSavedGenerationSummaries({ department, year, semester, academicYear }) {
+    const rows = await this.database.prepare(`
       SELECT versions.generation_id, MAX(versions.version_number) AS version_number,
         MIN(versions.created_at) AS created_at, MAX(versions.status) AS status,
         MAX(versions.locked_at) AS locked_at,
@@ -969,14 +1040,15 @@ export class TimetableRepository {
     }))
   }
 
-  setSavedTimetableVersionStatus({ versionId, status }) {
+  async setSavedTimetableVersionStatus({ versionId, status }) {
     if (!['SAVED', 'LOCKED'].includes(status)) throw new Error('A saved timetable can only be locked or explicitly unlocked.')
-    return withTransaction(this.database, () => {
-      const version = this.database.prepare(`
+    return withTransaction(this.database, async () => {
+      const version = await this.database.prepare(`
         SELECT versions.id, versions.status
         FROM timetable_versions versions
         JOIN generated_timetables timetables ON timetables.id = versions.timetable_id
         WHERE versions.id = ?
+        FOR UPDATE OF versions
       `).get(versionId)
       if (!version) throw new Error(`Saved timetable version ${versionId} was not found.`)
       const currentStatus = version.status
@@ -984,20 +1056,20 @@ export class TimetableRepository {
       if (status === 'LOCKED' && currentStatus !== 'SAVED') throw new Error('Only a SAVED timetable version can be locked.')
       if (status === 'SAVED' && currentStatus !== 'LOCKED') throw new Error('Only a LOCKED timetable version can be explicitly unlocked.')
 
-      const updatedRows = this.database.prepare(`
+      const updatedRows = await this.database.prepare(`
         UPDATE timetable_versions
         SET status = ?, locked_at = ?, updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
       `).run(status, status === 'LOCKED' ? new Date().toISOString() : null, versionId)
       if (updatedRows.changes !== 1) throw new Error(`Saved timetable version ${versionId} was not updated.`)
-      const updatedVersion = this.getSavedTimetableVersion(versionId)
+      const updatedVersion = await this.getSavedTimetableVersion(versionId)
       if (updatedVersion?.versionId !== versionId) throw new Error('The updated timetable version did not match the requested database version ID.')
       return updatedVersion
     })
   }
 
-  getSavedTimetableVersion(versionId) {
-    const version = this.database.prepare(`
+  async getSavedTimetableVersion(versionId) {
+    const version = await this.database.prepare(`
       SELECT versions.*, timetables.configuration_id, timetables.section_id,
         sections.source_id AS section_source_id, sections.section_name,
         configurations.department, configurations.year, configurations.semester, configurations.academic_year
@@ -1015,13 +1087,13 @@ export class TimetableRepository {
       sectionName: version.section_name,
       validation: JSON.parse(version.validation_json || '{}'),
       setupSnapshot: JSON.parse(version.setup_snapshot_json || '{}'),
-      sections: [this.savedVersionSection(version)],
+      sections: [await this.savedVersionSection(version)],
       versions: [versionRow(version)],
     }
   }
 
-  savedVersionSection(version) {
-    const rows = this.database.prepare(`
+  async savedVersionSection(version) {
+    const rows = await this.database.prepare(`
       SELECT * FROM timetable_cells WHERE timetable_version_id = ?
       ORDER BY CASE day
         WHEN 'Monday' THEN 1 WHEN 'Tuesday' THEN 2 WHEN 'Wednesday' THEN 3
@@ -1085,8 +1157,8 @@ export class TimetableRepository {
     }
   }
 
-  getSavedGeneration(generationId, configurationId) {
-    const versions = this.database.prepare(`
+  async getSavedGeneration(generationId, configurationId) {
+    const versions = await this.database.prepare(`
       SELECT versions.*, timetables.configuration_id, timetables.section_id,
         sections.source_id AS section_source_id, sections.section_name,
         configurations.department, configurations.year, configurations.semester, configurations.academic_year
@@ -1100,7 +1172,7 @@ export class TimetableRepository {
     if (versions.length === 0) return null
 
     const first = versions[0]
-    const scheduleSections = versions.map((version) => this.savedVersionSection(version))
+    const scheduleSections = await Promise.all(versions.map((version) => this.savedVersionSection(version)))
     return {
       generationId,
       configurationId,
@@ -1111,20 +1183,20 @@ export class TimetableRepository {
     }
   }
 
-  getActiveVersion(timetableId) {
-    const row = this.database.prepare(`
+  async getActiveVersion(timetableId) {
+    const row = await this.database.prepare(`
       SELECT versions.* FROM generated_timetables timetables
       JOIN timetable_versions versions ON versions.id = timetables.active_version_id
       WHERE timetables.id = ?
     `).get(timetableId)
     if (!row) return null
-    const cells = this.database.prepare(`
+    const cells = (await this.database.prepare(`
       SELECT * FROM timetable_cells WHERE timetable_version_id = ?
       ORDER BY CASE day
         WHEN 'Monday' THEN 1 WHEN 'Tuesday' THEN 2 WHEN 'Wednesday' THEN 3
         WHEN 'Thursday' THEN 4 WHEN 'Friday' THEN 5 WHEN 'Saturday' THEN 6 END,
         period
-    `).all(row.id).map(cellRow)
+    `).all(row.id)).map(cellRow)
     return { ...versionRow(row), cells }
   }
 }

@@ -60,17 +60,16 @@ After building, `pnpm preview` serves the Vite preview. Both Vite development an
 
 ## Database and Environment
 
-The SQLite database is created at `data/mvit-timetable.sqlite` by default. The repository applies pending SQL migrations when it opens the database. The database directory must be writable by the Node.js process.
+Timetable persistence uses the shared PostgreSQL database specified by `DATABASE_URL`. The repository applies pending PostgreSQL migrations when it connects. Configure `DATABASE_URL` in the server environment (or in a local, Git-ignored `.env` file); the connection string is never used in the browser.
 
-To use another database file, set the optional `TIMETABLE_DATABASE_PATH` environment variable in the process environment before starting Vite. For example, in PowerShell:
+For local development, copy `.env.example` to `.env`, supply the PostgreSQL connection string, and start Vite:
 
 ```powershell
-$env:TIMETABLE_DATABASE_PATH = 'D:\timetable-data\mvit-timetable.sqlite'
 pnpm dev
 ```
 
-`.env.example` lists the variable name only. No API keys or other credentials are required by the current project. Do not commit local `.env` files or SQLite database files.
+`.env.example` contains only the `DATABASE_URL=` placeholder. Do not commit local `.env` files or database credentials.
 
 ## Production Notes
 
-`pnpm build` creates the frontend build in `dist/`. The timetable-version API is currently attached to Vite's development and preview servers; a static-only deployment of `dist/` does not provide those persistence endpoints. The repository does not include a separate production API server or deployment configuration. A deployment that needs saved timetable persistence must provide a compatible API and a writable SQLite location, or otherwise adapt the existing backend for its production runtime. Do not treat Vite's preview server as a production server.
+`pnpm build` creates the frontend build in `dist/`. The timetable-version API is attached to Vite's development and preview servers; the Render service uses the preview server and must have `DATABASE_URL` set in its environment. A static-only deployment of `dist/` does not provide the persistence endpoints.

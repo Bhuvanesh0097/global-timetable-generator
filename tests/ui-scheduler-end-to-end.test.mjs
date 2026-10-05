@@ -1,14 +1,12 @@
-import test from 'node:test'
+import nodeTest from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
-import { mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import { createTimetableApiMiddleware } from '../backend/timetable-api.mjs'
-import { openTimetableRepository } from '../backend/timetable-repository.mjs'
+import { createTestPostgresRepository, hasPostgresTestDatabase } from './postgres-test-helpers.mjs'
 import { toGenericScheduleConfig } from '../src/generic-schedule-adapter.ts'
 import { generateGenericTimetable, validateGenericScheduleConfig } from '../src/generic-scheduler.ts'
 
+const test = hasPostgresTestDatabase ? nodeTest : nodeTest.skip
 const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
 
 function uiSetup(otherHours = 4) {
@@ -189,9 +187,8 @@ test('UI setup adapts through generation and saves/reloads the exact global time
     }
   }
 
-  const directory = mkdtempSync(join(tmpdir(), 'ui-scheduler-e2e-'))
-  const filename = join(directory, 'timetable.sqlite')
-  let repository = openTimetableRepository({ filename })
+  const testDatabase = await createTestPostgresRepository()
+  let repository = testDatabase.repository
   let { server, origin } = await startApi(repository)
   try {
     const saveResponse = await fetch(`${origin}/api/timetable-versions`, {
@@ -211,8 +208,8 @@ test('UI setup adapts through generation and saves/reloads the exact global time
     assert.equal(saved.timetableVersions.length, 2)
 
     await new Promise((resolve) => server.close(resolve))
-    repository.close()
-    repository = openTimetableRepository({ filename })
+    await testDatabase.close(repository)
+    repository = await testDatabase.open()
     ;({ server, origin } = await startApi(repository))
     const versionA = saved.timetableVersions.find(({ sectionName }) => sectionName === 'A')
     const loadResponse = await fetch(`${origin}/api/timetable-versions/${encodeURIComponent(versionA.versionId)}`)
@@ -223,7 +220,6 @@ test('UI setup adapts through generation and saves/reloads the exact global time
     assert.equal(cellsFor(loaded.sections[0]).filter((cell) => cell.alternateSubject).length, 2)
   } finally {
     await new Promise((resolve) => server.close(resolve))
-    repository.close()
-    rmSync(directory, { recursive: true, force: true })
+    await testDatabase.cleanup()
   }
 })
