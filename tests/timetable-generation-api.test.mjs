@@ -40,6 +40,30 @@ async function withApi(repository, runGeneration, callback) {
   }
 }
 
+async function waitForGeneration(origin, jobId) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const response = await fetch(`${origin}/api/timetable/generation-jobs/${jobId}`)
+    assert.equal(response.status, 200)
+    const job = await response.json()
+    if (job.status === 'completed') return job.value
+    if (job.status === 'failed') throw new Error(job.error)
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  assert.fail('The generation job did not finish.')
+}
+
+async function postGeneration(origin, body) {
+  const response = await fetch(`${origin}/api/timetable/generate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  assert.equal(response.status, 202)
+  const { jobId } = await response.json()
+  assert.match(jobId, /^[0-9a-f-]{36}$/i)
+  return { response, jobId }
+}
+
 test('generation API loads global occupancy and passes the complete scheduler input to its worker', async () => {
   const occupied = [{ teacherId: 'ST003', day: 'Monday', period: 3 }]
   let workerInput
@@ -70,16 +94,11 @@ test('generation API loads global occupancy and passes the complete scheduler in
     workerInput = input
     return { result }
   }, async (origin) => {
-    const response = await fetch(`${origin}/api/timetable/generate`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        configuration,
-        reservedSections: [{ sectionId: 'B', schedule: {} }],
-      }),
+    const { jobId } = await postGeneration(origin, {
+      configuration,
+      reservedSections: [{ sectionId: 'B', schedule: {} }],
     })
-    assert.equal(response.status, 200)
-    assert.deepEqual((await response.json()).result, result)
+    assert.deepEqual((await waitForGeneration(origin, jobId)).result, result)
   })
 
   assert.equal(occupancyLookups, 1)
@@ -114,17 +133,67 @@ test('generation API refreshes occupancy and retries a conflicting candidate wit
     generationCalls += 1
     return { result: { ok: true, sections: [generatedSection], searchNodes: 1, validation: { sections: [], globalTeacherClashes: 0 } } }
   }, async (origin) => {
-    const response = await fetch(`${origin}/api/timetable/generate`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ configuration, reservedSections: [] }),
-    })
-    assert.equal(response.status, 200)
-    assert.equal((await response.json()).result.ok, true)
+    const { jobId } = await postGeneration(origin, { configuration, reservedSections: [] })
+    assert.equal((await waitForGeneration(origin, jobId)).result.ok, true)
   })
 
   assert.equal(generationCalls, 2)
   assert.equal(occupancyLookups, 2)
+})
+
+test('generation requests return immediately while the worker continues and can be polled', async () => {
+  let releaseGeneration
+  let workerStarted = false
+  const workerResult = new Promise((resolve) => { releaseGeneration = resolve })
+  const repository = {
+    async getTeacherUnavailableOccupancy() {
+      return { unavailableSlots: [], alternateWeekUnavailableSlots: [] }
+    },
+    async getTeacherGenerationOccupancyConflicts() {
+      return []
+    },
+  }
+  const result = {
+    ok: true,
+    sections: [],
+    searchNodes: 1,
+    validation: { sections: [], globalTeacherClashes: 0 },
+  }
+
+  await withApi(repository, async () => {
+    workerStarted = true
+    return workerResult
+  }, async (origin) => {
+    const { jobId } = await postGeneration(origin, { configuration, reservedSections: [] })
+    for (let attempt = 0; attempt < 100 && !workerStarted; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+    assert.equal(workerStarted, true)
+    releaseGeneration({ result })
+    assert.deepEqual((await waitForGeneration(origin, jobId)).result, result)
+  })
+})
+
+test('generation worker failures are returned as structured job errors', async () => {
+  await withApi({
+    async getTeacherUnavailableOccupancy() {
+      return { unavailableSlots: [], alternateWeekUnavailableSlots: [] }
+    },
+  }, async () => {
+    throw Object.assign(new Error('worker unavailable'), { code: 'SCHEDULER_UNAVAILABLE' })
+  }, async (origin) => {
+    const { jobId } = await postGeneration(origin, { configuration, reservedSections: [] })
+    let job
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const response = await fetch(`${origin}/api/timetable/generation-jobs/${jobId}`)
+      job = await response.json()
+      if (job.status === 'failed') break
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    assert.equal(job.status, 'failed')
+    assert.equal(job.error, 'worker unavailable')
+    assert.equal(job.code, 'SCHEDULER_UNAVAILABLE')
+  })
 })
 
 test('generation API rejects incomplete input before loading occupancy', async () => {

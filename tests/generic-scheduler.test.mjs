@@ -182,6 +182,13 @@ test('normal subjects stay within two consecutive periods unless configured as a
   }
 })
 
+test('fail-first single-period search completes a valid full-week workload without broad backtracking', () => {
+  const config = { ...oneSectionConfig(48), randomSeed: 12345 }
+  const result = generateGenericTimetable(config)
+  assertEverySectionIsComplete(result, 1)
+  if (result.ok) assert.ok(result.searchNodes < 1_000, `Expected bounded search, received ${result.searchNodes} nodes.`)
+})
+
 test('generic engine applies 3-first lab blocks and counts P1 tests inside subject hours', () => {
   const result = generateGenericTimetable({
     ...identity,

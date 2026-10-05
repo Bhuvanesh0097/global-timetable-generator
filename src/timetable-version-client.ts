@@ -146,9 +146,37 @@ export function generateGenericTimetableOnServer(input: {
   configuration: GenericScheduleConfig
   reservedSections: GenericGeneratedSection[]
 }): Promise<GenericTimetableGenerationResponse> {
-  return apiRequest('/api/timetable/generate', {
+  return createGenerationRequest(input)
+}
+
+async function createGenerationRequest(input: {
+  configuration: GenericScheduleConfig
+  reservedSections: GenericGeneratedSection[]
+}): Promise<GenericTimetableGenerationResponse> {
+  const { jobId } = await apiRequest<{ jobId: string }>('/api/timetable/generate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
   })
+  const deadline = Date.now() + 30 * 60 * 1000
+  let pollInterval = 500
+
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => window.setTimeout(resolve, pollInterval))
+    const job = await apiRequest<{
+      status: 'queued' | 'running' | 'completed' | 'failed'
+      value?: GenericTimetableGenerationResponse
+      error?: string
+    }>(`/api/timetable/generation-jobs/${encodeURIComponent(jobId)}`)
+    if (job.status === 'completed') {
+      if (!job.value?.result) throw new Error('The timetable generation service returned an invalid job result.')
+      return job.value
+    }
+    if (job.status === 'failed') {
+      throw new Error(job.error || 'The timetable generation service failed.')
+    }
+    pollInterval = Math.min(2_000, Math.round(pollInterval * 1.5))
+  }
+
+  throw new Error('Timetable generation is taking longer than expected. The server may still be working; please check again before submitting another request.')
 }

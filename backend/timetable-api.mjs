@@ -1,6 +1,9 @@
+import { randomUUID } from 'node:crypto'
 import { runGenericTimetableGeneration } from './generic-scheduler-worker-pool.mjs'
 
 const maximumBodyBytes = 2 * 1024 * 1024
+const maximumRetainedGenerationJobs = 256
+const generationJobRetentionMs = 30 * 60 * 1000
 const supportedDays = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
 const setupArrayFields = [
   'staff', 'sections', 'coreSubjects', 'otherSubjectMaster', 'otherSubjects', 'labMaster',
@@ -106,6 +109,80 @@ function generationConflictMessage(conflicts) {
 export function createTimetableApiMiddleware(repository, {
   runGeneration = runGenericTimetableGeneration,
 } = {}) {
+  const generationJobs = new Map()
+
+  const pruneGenerationJobs = () => {
+    const expiredBefore = Date.now() - generationJobRetentionMs
+    for (const [jobId, job] of generationJobs) {
+      if (job.status !== 'queued' && job.status !== 'running' && job.finishedAt < expiredBefore) {
+        generationJobs.delete(jobId)
+      }
+    }
+  }
+
+  const runGenerationJob = async (job, { configuration, reservedSections, identity, occupancyStaff }) => {
+    job.status = 'running'
+    try {
+      const maximumAttempts = 8
+      let lastOccupancyConflicts = []
+
+      for (let attempt = 0; attempt < maximumAttempts; attempt += 1) {
+        const occupancy = await repository.getTeacherUnavailableOccupancy({
+          identity,
+          staff: occupancyStaff,
+        })
+        const generated = await runGeneration({
+          configuration,
+          reservedSections,
+          unavailableTeacherSlots: occupancy.unavailableSlots,
+          alternateWeekUnavailableTeacherSlots: occupancy.alternateWeekUnavailableSlots,
+        })
+        if (!generated?.result || typeof generated.result.ok !== 'boolean') {
+          throw new Error('The timetable scheduler returned an invalid response.')
+        }
+        if (!generated.result.ok) {
+          job.value = { result: generated.result }
+          job.status = 'completed'
+          job.finishedAt = Date.now()
+          return
+        }
+
+        lastOccupancyConflicts = await repository.getTeacherGenerationOccupancyConflicts({
+          identity,
+          sections: generated.result.sections,
+          staff: occupancyStaff,
+        })
+        if (lastOccupancyConflicts.length === 0) {
+          job.value = {
+            result: generated.result,
+            ...(generated.placementException ? { placementException: generated.placementException } : {}),
+          }
+          job.status = 'completed'
+          job.finishedAt = Date.now()
+          return
+        }
+      }
+
+      job.value = {
+        result: {
+          ok: false,
+          code: 'UNSATISFIABLE',
+          message: 'Every generated candidate conflicts with a saved timetable teacher assignment.',
+          blockingConstraints: generationConflictMessage(lastOccupancyConflicts),
+        },
+      }
+      job.status = 'completed'
+    } catch (error) {
+      job.error = {
+        message: error instanceof Error ? error.message : 'The timetable generation service failed.',
+        ...(typeof error?.code === 'string' ? { code: error.code } : {}),
+      }
+      job.status = 'failed'
+    } finally {
+      job.finishedAt = Date.now()
+    }
+  }
+
   return async (request, response, next) => {
     const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`)
     const pathname = url.pathname.replace(/^\/api(?=\/|$)/, '')
@@ -120,49 +197,38 @@ export function createTimetableApiMiddleware(repository, {
         }
         const identity = generationIdentity(configuration)
         const occupancyStaff = generationStaff(configuration)
-        const maximumAttempts = 8
-        let lastOccupancyConflicts = []
-
-        for (let attempt = 0; attempt < maximumAttempts; attempt += 1) {
-          const occupancy = await repository.getTeacherUnavailableOccupancy({
-            identity,
-            staff: occupancyStaff,
-          })
-          const generated = await runGeneration({
+        pruneGenerationJobs()
+        if (generationJobs.size >= maximumRetainedGenerationJobs) {
+          sendJson(response, 503, { error: 'The timetable generation service is busy. Please wait briefly and try again.', code: 'SCHEDULER_CAPACITY' })
+          return
+        }
+        const jobId = randomUUID()
+        const job = { status: 'queued' }
+        generationJobs.set(jobId, job)
+        sendJson(response, 202, { jobId })
+        setImmediate(() => {
+          void runGenerationJob(job, {
             configuration,
             reservedSections,
-            unavailableTeacherSlots: occupancy.unavailableSlots,
-            alternateWeekUnavailableTeacherSlots: occupancy.alternateWeekUnavailableSlots,
-          })
-          if (!generated?.result || typeof generated.result.ok !== 'boolean') {
-            throw new Error('The timetable scheduler returned an invalid response.')
-          }
-          if (!generated.result.ok) {
-            sendJson(response, 200, { result: generated.result })
-            return
-          }
-
-          lastOccupancyConflicts = await repository.getTeacherGenerationOccupancyConflicts({
             identity,
-            sections: generated.result.sections,
-            staff: occupancyStaff,
+            occupancyStaff,
           })
-          if (lastOccupancyConflicts.length === 0) {
-            sendJson(response, 200, {
-              result: generated.result,
-              ...(generated.placementException ? { placementException: generated.placementException } : {}),
-            })
-            return
-          }
-        }
+        })
+        return
+      }
 
+      const generationJobMatch = pathname.match(/^\/timetable\/generation-jobs\/([0-9a-f-]{36})$/i)
+      if (request.method === 'GET' && generationJobMatch) {
+        pruneGenerationJobs()
+        const job = generationJobs.get(generationJobMatch[1])
+        if (!job) {
+          sendJson(response, 404, { error: 'That timetable generation request was not found.' })
+          return
+        }
         sendJson(response, 200, {
-          result: {
-            ok: false,
-            code: 'UNSATISFIABLE',
-            message: 'Every generated candidate conflicts with a saved timetable teacher assignment.',
-            blockingConstraints: generationConflictMessage(lastOccupancyConflicts),
-          },
+          status: job.status,
+          ...(job.value ? { value: job.value } : {}),
+          ...(job.error ? { error: job.error.message, code: job.error.code } : {}),
         })
         return
       }

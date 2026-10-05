@@ -931,6 +931,24 @@ function buildSchedule(
         !hasFixedTeacherConflict(item, candidate, 1)))
     }
   }
+  const legalSingleCandidates = (): Map<WorkItem, BlockCandidate[]> | undefined => {
+    const result = new Map<WorkItem, BlockCandidate[]>()
+    for (const section of normalizedSections) {
+      for (const item of itemsBySection.get(section.key) ?? []) {
+        if (item.schedulesAsBlocks || item.blockDuration !== 1 || item.remaining <= 0) continue
+        const task = { id: `single:${item.id}`, item, duration: 1, isTest: false }
+        const candidates = singleCandidatesByItem.get(item)!.filter((candidate) => canPlace(task, candidate))
+        if (candidates.length < item.remaining) {
+          const reason = `${item.name}: only ${candidates.length} legal period(s) remain for ${item.remaining} required period(s).`
+          searchDeadEnds.set(reason, (searchDeadEnds.get(reason) ?? 0) + 1)
+          return undefined
+        }
+        result.set(item, candidates)
+      }
+    }
+    return result
+  }
+  const singleCandidatesHaveCapacity = () => legalSingleCandidates() !== undefined
   const assignedCandidates = new Map<string, BlockCandidate>()
   const candidatesFor = (task: BlockTask): BlockCandidate[] => {
     const previousPositions = previousEquivalentTasks.get(task.id)!
@@ -945,66 +963,57 @@ function buildSchedule(
 
   const fillSinglePeriods = (): boolean => {
     if (++searchNodes > searchLimit) { exceededLimit = true; return false }
-    let chosenSlot: { sectionId: string; dayIndex: number; period: number } | undefined
-    let chosenItems: WorkItem[] = []
-    const candidateCounts = new Map<WorkItem, number>()
-    const candidatesBySlot = new Map<string, WorkItem[]>()
-    const pendingItems = normalizedSections.flatMap((section) =>
-      (itemsBySection.get(section.key) ?? []).filter((item) =>
-        !item.schedulesAsBlocks && item.blockDuration === 1 && item.remaining > 0))
-    if (!pendingItems.length) return [...states.values()].every((state) => state.cells.every(Boolean))
+    const candidatesByItem = legalSingleCandidates()
+    if (!candidatesByItem) return false
+    if (!candidatesByItem.size) return [...states.values()].every((state) => state.cells.every(Boolean))
       && areSectionArrangementsUniqueWithReserved(normalizedSections, states, reservedSections)
 
-    for (const item of pendingItems) {
-      const task = { id: `single:${item.id}`, item, duration: 1, isTest: false }
-      const candidates = singleCandidatesByItem.get(item)!.filter((candidate) => canPlace(task, candidate))
-      if (candidates.length < item.remaining) {
-        const reason = `${item.name}: only ${candidates.length} legal period(s) remain for ${item.remaining} required period(s).`
-        searchDeadEnds.set(reason, (searchDeadEnds.get(reason) ?? 0) + 1)
-        return false
-      }
-      candidateCounts.set(item, candidates.length)
+    const peersByStudentSlot = new Map<string, Set<WorkItem>>()
+    const peersByTeacherSlot = new Map<string, Set<WorkItem>>()
+    for (const [item, candidates] of candidatesByItem) {
       for (const candidate of candidates) {
-        const index = slotIndex(candidate.dayIndex, candidate.startPeriod)
-        const key = `${item.sectionId}:${index}`
-        const items = candidatesBySlot.get(key) ?? []
-        items.push(item)
-        candidatesBySlot.set(key, items)
+        const position = slotIndex(candidate.dayIndex, candidate.startPeriod)
+        const studentKey = `${item.sectionId}:${position}`
+        const studentPeers = peersByStudentSlot.get(studentKey) ?? new Set<WorkItem>()
+        studentPeers.add(item)
+        peersByStudentSlot.set(studentKey, studentPeers)
+        const teacherKey = `${item.teacherId}:${position}`
+        const teacherPeers = peersByTeacherSlot.get(teacherKey) ?? new Set<WorkItem>()
+        teacherPeers.add(item)
+        peersByTeacherSlot.set(teacherKey, teacherPeers)
       }
     }
-    for (const section of normalizedSections) {
-      const cells = states.get(section.key)!.cells
-      for (let dayIndex = 0; dayIndex < genericTimetableDays.length; dayIndex += 1) {
-        for (const period of periods) {
-          const index = slotIndex(dayIndex, period)
-          if (cells[index]) continue
-          const items = candidatesBySlot.get(`${section.key}:${index}`) ?? []
-          if (!items.length) return false
-          if (!chosenSlot || items.length < chosenItems.length) {
-            chosenSlot = { sectionId: section.key, dayIndex, period }
-            chosenItems = items
-          }
-        }
-      }
+    const peerCount = (item: WorkItem, candidate: BlockCandidate): number => {
+      const position = slotIndex(candidate.dayIndex, candidate.startPeriod)
+      const peers = new Set([
+        ...(peersByStudentSlot.get(`${item.sectionId}:${position}`) ?? []),
+        ...(peersByTeacherSlot.get(`${item.teacherId}:${position}`) ?? []),
+      ])
+      peers.delete(item)
+      return peers.size
     }
-    if (!chosenSlot) return false
-
-    const candidates = shuffled(chosenItems, random).sort((left, right) => {
-      const leftDayCount = countItemOnDay(left, chosenSlot!.dayIndex)
-      const rightDayCount = countItemOnDay(right, chosenSlot!.dayIndex)
-      const leftCoreCount = getDayCells(left, chosenSlot!.dayIndex).filter((cell) => cell?.kind === 'core').length
-      const rightCoreCount = getDayCells(right, chosenSlot!.dayIndex).filter((cell) => cell?.kind === 'core').length
-      return leftDayCount - rightDayCount
-        || (left.isCore ? leftCoreCount : 0) - (right.isCore ? rightCoreCount : 0)
-        || left.remaining - right.remaining
-        || candidateCounts.get(left)! - candidateCounts.get(right)!
-    })
-    const slot = { dayIndex: chosenSlot.dayIndex, startPeriod: chosenSlot.period }
-    for (const item of candidates) {
+    const pressureByItem = new Map<WorkItem, number>()
+    for (const [item, candidates] of candidatesByItem) {
+      pressureByItem.set(item, candidates.reduce((total, candidate) => total + peerCount(item, candidate), 0))
+    }
+    const [item] = shuffled([...candidatesByItem.keys()], random).sort((left, right) =>
+      (candidatesByItem.get(left)!.length - left.remaining) - (candidatesByItem.get(right)!.length - right.remaining)
+      || pressureByItem.get(right)! - pressureByItem.get(left)!
+      || candidatesByItem.get(left)!.length - candidatesByItem.get(right)!.length
+      || right.remaining - left.remaining)
+    if (!item) return false
+    const candidates = shuffled(candidatesByItem.get(item)!, random).sort((left, right) =>
+      peerCount(item, left) - peerCount(item, right)
+      || countItemOnDay(item, left.dayIndex) - countItemOnDay(item, right.dayIndex)
+      || (item.isCore
+        ? getDayCells(item, left.dayIndex).filter((cell) => cell?.kind === 'core').length
+          - getDayCells(item, right.dayIndex).filter((cell) => cell?.kind === 'core').length
+        : 0))
+    for (const candidate of candidates) {
       const task = { id: `single:${item.id}`, item, duration: 1, isTest: false }
-      put(task, slot)
+      put(task, candidate)
       if (fillSinglePeriods()) return true
-      remove(task, slot)
+      remove(task, candidate)
       if (exceededLimit) return false
     }
     return false
@@ -1012,6 +1021,7 @@ function buildSchedule(
 
   const placeBlocks = (assigned: Set<string>): boolean => {
     if (++searchNodes > searchLimit) { exceededLimit = true; return false }
+    if (testTasks.every((task) => assigned.has(task.id)) && !singleCandidatesHaveCapacity()) return false
     const pending = tasks.filter((task) => !assigned.has(task.id))
     if (!pending.length) return fillSinglePeriods()
     let selected: BlockTask | undefined
