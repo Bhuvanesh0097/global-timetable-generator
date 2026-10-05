@@ -544,24 +544,20 @@ function buildSchedule(
     section, profileKey, profile,
     cells: Array<GenericCell | null>(genericStudentSlotsPerWeek).fill(null),
   }]))
-  const teacherAtSlot = new Map<number, Set<string>>()
-  for (const [slot, reservedTeachers] of reservedTeacherSlots(reservedSections)) {
-    teacherAtSlot.set(slot, new Set(reservedTeachers))
-  }
+  const fixedTeacherAtSlot = reservedTeacherSlots(reservedSections)
   for (const [slot, unavailableTeachers] of unavailableTeacherSlotMap(unavailableTeacherSlots)) {
-    const teachers = teacherAtSlot.get(slot) ?? new Set<string>()
+    const teachers = fixedTeacherAtSlot.get(slot) ?? new Set<string>()
     for (const teacher of unavailableTeachers) teachers.add(teacher)
-    teacherAtSlot.set(slot, teachers)
+    fixedTeacherAtSlot.set(slot, teachers)
   }
-  const alternateTeacherAtSlot = new Map<number, Set<string>>()
-  for (const [slot, reservedTeachers] of reservedTeacherSlots(reservedSections, true)) {
-    alternateTeacherAtSlot.set(slot, new Set(reservedTeachers))
-  }
+  const fixedAlternateTeacherAtSlot = reservedTeacherSlots(reservedSections, true)
   for (const [slot, unavailableTeachers] of unavailableTeacherSlotMap(alternateWeekUnavailableTeacherSlots)) {
-    const teachers = alternateTeacherAtSlot.get(slot) ?? new Set<string>()
+    const teachers = fixedAlternateTeacherAtSlot.get(slot) ?? new Set<string>()
     for (const teacher of unavailableTeachers) teachers.add(teacher)
-    alternateTeacherAtSlot.set(slot, teachers)
+    fixedAlternateTeacherAtSlot.set(slot, teachers)
   }
+  const teacherAtSlot = new Map<number, Set<string>>()
+  const alternateTeacherAtSlot = new Map<number, Set<string>>()
   const placementAlternateClashes = new Set<string>()
   const describeOccupiedTeacher = (teacherId: string, index: number): string | undefined => {
     const dayIndex = Math.floor(index / genericPeriodsPerDay)
@@ -570,13 +566,13 @@ function buildSchedule(
     for (const section of reservedSections) {
       const cell = section.schedule[day]?.[period]
       if (cell && (cell.alternateSubject?.teacherId ?? cell.teacherId) === teacherId) {
-        return `${section.department} Section ${section.sectionId} — ${cell.alternateSubject?.name ?? cell.name}`
+        return `${section.department} · ${section.year} · ${section.semester} · Section ${section.sectionId} — ${cell.alternateSubject?.name ?? cell.name}`
       }
     }
     for (const state of states.values()) {
       if (state.cells[index] && (state.cells[index]!.alternateSubject?.teacherId ?? state.cells[index]!.teacherId) === teacherId) {
         const cell = state.cells[index]!
-        return `${state.profile.department} Section ${state.section.id} — ${cell.alternateSubject?.name ?? cell.name}`
+        return `${state.profile.department} · ${state.profile.year} · ${state.profile.semester} · Section ${state.section.id} — ${cell.alternateSubject?.name ?? cell.name}`
       }
     }
     const saved = alternateWeekUnavailableTeacherSlots.find((entry) => entry.teacherId === teacherId && entry.day === day && entry.period === period)
@@ -651,6 +647,37 @@ function buildSchedule(
       teacherId: assignment.teacherId,
       teacherNameSnapshot: assignment.teacherNameSnapshot,
     }
+  }
+  const hasFixedTeacherConflict = (item: WorkItem, candidate: BlockCandidate, duration: number): boolean => {
+    for (let offset = 0; offset < duration; offset += 1) {
+      const index = slotIndex(candidate.dayIndex, candidate.startPeriod + offset)
+      if (fixedTeacherAtSlot.get(index)?.has(item.teacherId)) return true
+      const alternateTeacherId = item.isPlacement && item.placementException
+        ? alternateAssignment(alternateDefinition(item, offset + 1)!, inputSectionId(item.sectionId))?.teacherId
+        : item.teacherId
+      if (!alternateTeacherId) return true
+      if (fixedAlternateTeacherAtSlot.get(index)?.has(alternateTeacherId)) {
+        const occupiedBy = describeOccupiedTeacher(alternateTeacherId, index)
+        if (occupiedBy) {
+          const day = genericTimetableDays[candidate.dayIndex]
+          const period = candidate.startPeriod + offset
+          if (item.isPlacement && item.placementException) {
+            const alternate = alternateDefinition(item, offset + 1)!
+            const teacherName = alternateAssignment(alternate, inputSectionId(item.sectionId))?.teacherNameSnapshot
+              ?? alternateTeacherId
+            const state = states.get(item.sectionId)!
+            placementAlternateClashes.add(`${state.profile.department} · ${state.profile.year} · ${state.profile.semester} · Section ${state.section.id} alternate subject ${alternate.subjectNameSnapshot} assigned to ${teacherName} (${alternateTeacherId}) conflicts at ${day} P${period} with ${occupiedBy}.`)
+          } else {
+            const teacherName = states.get(item.sectionId)?.profile.staff.find((staff) => staff.id === item.teacherId)?.name
+              ?? item.teacherId
+            const state = states.get(item.sectionId)!
+            placementAlternateClashes.add(`${state.profile.department} · ${state.profile.year} · ${state.profile.semester} · Section ${state.section.id} ${item.name} assigned to ${teacherName} (${item.teacherId}) conflicts at ${day} P${period} with ${occupiedBy}.`)
+          }
+        }
+        return true
+      }
+    }
+    return false
   }
   const projectedAlternateItem = (sectionId: string, cell: GenericCell | null | undefined): WorkItem | undefined => {
     if (!cell) return undefined
@@ -752,14 +779,14 @@ function buildSchedule(
           const section = sectionState.section
           const teacherName = alternateAssignment(alternate, inputSectionId(item.sectionId))?.teacherNameSnapshot ?? alternateTeacherId
           const occupiedBy = describeOccupiedTeacher(alternateTeacherId, index) ?? 'another occupied timetable slot'
-          placementAlternateClashes.add(`${sectionState.profile.department} Section ${section.id} alternate subject ${alternate.subjectNameSnapshot} assigned to ${teacherName} (${alternateTeacherId}) conflicts at ${genericTimetableDays[dayIndex]} P${period} with ${occupiedBy}.`)
+          placementAlternateClashes.add(`${sectionState.profile.department} · ${sectionState.profile.year} · ${sectionState.profile.semester} · Section ${section.id} alternate subject ${alternate.subjectNameSnapshot} assigned to ${teacherName} (${alternateTeacherId}) conflicts at ${genericTimetableDays[dayIndex]} P${period} with ${occupiedBy}.`)
           return false
         }
       } else if (alternateTeacherAtSlot.get(index)?.has(item.teacherId)) {
         const occupiedBy = describeOccupiedTeacher(item.teacherId, index)
         if (occupiedBy) {
           const teacherName = states.get(item.sectionId)?.profile.staff.find((staff) => staff.id === item.teacherId)?.name ?? item.teacherId
-          placementAlternateClashes.add(`${sectionState.profile.department} Section ${sectionState.section.id} ${item.name} assigned to ${teacherName} (${item.teacherId}) conflicts at ${genericTimetableDays[dayIndex]} P${period} with ${occupiedBy}.`)
+          placementAlternateClashes.add(`${sectionState.profile.department} · ${sectionState.profile.year} · ${sectionState.profile.semester} · Section ${sectionState.section.id} ${item.name} assigned to ${teacherName} (${item.teacherId}) conflicts at ${genericTimetableDays[dayIndex]} P${period} with ${occupiedBy}.`)
         }
         return false
       }
@@ -876,33 +903,42 @@ function buildSchedule(
 
   const equivalentTaskGroups = new Map<string, BlockTask[]>()
   const previousEquivalentTasks = new Map<string, BlockTask[]>()
-  const taskStartPeriods = new Map<string, number[]>()
+  const taskCandidates = new Map<string, BlockCandidate[]>()
   for (const task of tasks) {
     const key = JSON.stringify([task.item.id, task.duration, task.isTest])
     const group = equivalentTaskGroups.get(key) ?? []
     previousEquivalentTasks.set(task.id, [...group])
     group.push(task)
     equivalentTaskGroups.set(key, group)
-    if (!task.isTest) {
-      taskStartPeriods.set(task.id, validStartsForBlock(
+    const candidates = task.isTest
+      ? genericTimetableDays.map((_, dayIndex) => ({ dayIndex, startPeriod: 1 }))
+      : genericTimetableDays.flatMap((_, dayIndex) =>
+        validStartsForBlock(
         { ...task.item, isNormalActivity: isNormalActivity(task.item) },
         task.duration,
         task.item.rules,
-      ))
+        ).map((startPeriod) => ({ dayIndex, startPeriod })))
+    taskCandidates.set(task.id, candidates.filter((candidate) =>
+      !hasFixedTeacherConflict(task.item, candidate, task.duration)))
+  }
+  const singleCandidatesByItem = new Map<WorkItem, BlockCandidate[]>()
+  for (const items of itemsBySection.values()) {
+    for (const item of items) {
+      if (item.schedulesAsBlocks || item.blockDuration !== 1) continue
+      const candidates = genericTimetableDays.flatMap((_, dayIndex) =>
+        periods.map((startPeriod) => ({ dayIndex, startPeriod })))
+      singleCandidatesByItem.set(item, candidates.filter((candidate) =>
+        !hasFixedTeacherConflict(item, candidate, 1)))
     }
   }
   const assignedCandidates = new Map<string, BlockCandidate>()
   const candidatesFor = (task: BlockTask): BlockCandidate[] => {
-    const candidates = task.isTest
-      ? genericTimetableDays.map((_, dayIndex) => ({ dayIndex, startPeriod: 1 }))
-      : genericTimetableDays.flatMap((_, dayIndex) =>
-        taskStartPeriods.get(task.id)!.map((startPeriod) => ({ dayIndex, startPeriod })))
     const previousPositions = previousEquivalentTasks.get(task.id)!
       .map((previous) => assignedCandidates.get(previous.id))
       .filter((candidate): candidate is BlockCandidate => candidate !== undefined)
       .map((candidate) => candidate.dayIndex * genericPeriodsPerDay + candidate.startPeriod)
     const minimumPosition = previousPositions.length ? Math.max(...previousPositions) : -1
-    return candidates
+    return taskCandidates.get(task.id)!
       .filter((candidate) => candidate.dayIndex * genericPeriodsPerDay + candidate.startPeriod > minimumPosition)
       .filter((candidate) => canPlace(task, candidate))
   }
@@ -921,9 +957,7 @@ function buildSchedule(
 
     for (const item of pendingItems) {
       const task = { id: `single:${item.id}`, item, duration: 1, isTest: false }
-      const candidates = genericTimetableDays.flatMap((_, dayIndex) =>
-        periods.map((period) => ({ dayIndex, startPeriod: period })))
-        .filter((candidate) => canPlace(task, candidate))
+      const candidates = singleCandidatesByItem.get(item)!.filter((candidate) => canPlace(task, candidate))
       if (candidates.length < item.remaining) {
         const reason = `${item.name}: only ${candidates.length} legal period(s) remain for ${item.remaining} required period(s).`
         searchDeadEnds.set(reason, (searchDeadEnds.get(reason) ?? 0) + 1)
@@ -982,6 +1016,7 @@ function buildSchedule(
     if (!pending.length) return fillSinglePeriods()
     let selected: BlockTask | undefined
     let candidates: BlockCandidate[] = []
+    let selectedPriority = -1
     for (const task of pending) {
       if (previousEquivalentTasks.get(task.id)!.some((previous) => !assigned.has(previous.id))) continue
       const options = candidatesFor(task)
@@ -993,7 +1028,18 @@ function buildSchedule(
         searchDeadEnds.set(reason, (searchDeadEnds.get(reason) ?? 0) + 1)
         return false
       }
-      if (!selected || options.length < candidates.length) { selected = task; candidates = options }
+      const priority = task.isTest ? 4
+        : task.item.isPlacement && task.item.placementException ? 3
+          : task.item.isLab ? 2
+            : isNormalActivity(task.item) ? 1 : 0
+      if (!selected || options.length < candidates.length
+        || (options.length === candidates.length
+          && (priority > selectedPriority
+            || (priority === selectedPriority && task.duration > selected.duration)))) {
+        selected = task
+        candidates = options
+        selectedPriority = priority
+      }
       if (!options.length) {
         const reason = `${task.item.name}: its ${task.duration}-period block has no legal remaining placement.`
         searchDeadEnds.set(reason, (searchDeadEnds.get(reason) ?? 0) + 1)

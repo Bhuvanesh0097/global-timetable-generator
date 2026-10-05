@@ -18,10 +18,6 @@ function normalizedTeacherName(name) {
   return String(name ?? '').normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase()
 }
 
-function comparableTeacherIdentity(name) {
-  return String(name ?? '').normalize('NFKC').toLocaleLowerCase().replace(/[^\p{L}\p{N}]/gu, '')
-}
-
 function serialize(value, fallback = '{}') {
   return JSON.stringify(value ?? {}) ?? fallback
 }
@@ -669,13 +665,13 @@ export class TimetableRepository {
         COALESCE(cells.activity_name, cells.subject_name, cells.subject_code, 'Unlabeled activity') AS subject,
         configurations.department AS configured_department, configurations.year AS configured_year,
         configurations.semester AS configured_semester, configurations.academic_year
-      FROM timetable_cells cells
-      JOIN timetable_versions versions ON versions.id = cells.timetable_version_id
-      JOIN generated_timetables timetables ON timetables.id = versions.timetable_id
+      FROM generated_timetables timetables
+      JOIN timetable_versions versions
+        ON versions.id = timetables.active_version_id
+        AND versions.status IN ('SAVED', 'LOCKED')
+      JOIN timetable_cells cells ON cells.timetable_version_id = versions.id
       JOIN timetable_configurations configurations ON configurations.id = timetables.configuration_id
-      WHERE versions.status IN ('SAVED', 'LOCKED')
-        AND versions.id = timetables.active_version_id
-        AND NOT (
+      WHERE NOT (
           configurations.department = ? AND configurations.year = ?
           AND configurations.semester = ? AND configurations.academic_year = ?
         )
@@ -781,14 +777,14 @@ export class TimetableRepository {
         COALESCE(cells.activity_name, cells.subject_name, cells.subject_code, 'Unlabeled activity') AS subject,
         configurations.department AS configured_department, configurations.year AS configured_year,
         configurations.semester AS configured_semester, configurations.academic_year
-      FROM timetable_cells cells
-      JOIN timetable_versions versions ON versions.id = cells.timetable_version_id
-      JOIN generated_timetables timetables ON timetables.id = versions.timetable_id
+      FROM generated_timetables timetables
+      JOIN timetable_versions versions
+        ON versions.id = timetables.active_version_id
+        AND versions.status IN ('SAVED', 'LOCKED')
+      JOIN timetable_cells cells ON cells.timetable_version_id = versions.id
       JOIN sections ON sections.id = timetables.section_id
       JOIN timetable_configurations configurations ON configurations.id = timetables.configuration_id
-      WHERE versions.status IN ('SAVED', 'LOCKED')
-        AND versions.id = timetables.active_version_id
-        AND NOT (
+      WHERE NOT (
           configurations.department = ? AND configurations.year = ?
           AND configurations.semester = ? AND configurations.academic_year = ?
         )
@@ -824,7 +820,10 @@ export class TimetableRepository {
       const ordered = [...block].sort((left, right) => left.period - right.period)
       const placementException = snapshotFor(ordered[0]).placementException
       for (const [index, existing] of ordered.entries()) {
-        const alternate = placementException.alternateSubjects?.find((row) => row.placementPosition === index + 1)
+        const alternates = placementException.alternateSubjects ?? []
+        const alternate = alternates.find((row) =>
+          row.placementPosition === index + 1 && row.sectionId === existing.section_source_id)
+          ?? alternates.find((row) => row.placementPosition === index + 1 && !row.sectionId)
         const assignment = alternate?.teacherAssignments?.find((row) => row.sectionId === existing.section_source_id)
         if (assignment?.teacherId) alternateTeacherForCell.set(existing, {
           teacherId: assignment.teacherId,
@@ -834,80 +833,30 @@ export class TimetableRepository {
         })
       }
     }
-    // Resolve aliases against teachers who actually occupy active saved slots.
-    // Candidate configuration rows are deliberately excluded: registering a
-    // formatting variant must not make a unique saved identity ambiguous.
-    const persistedIds = new Set()
-    const persistedIdsByName = new Map()
-    const rememberPersistedTeacher = (teacherId, teacherName) => {
-      if (!teacherId) return
-      persistedIds.add(teacherId)
-      const comparableName = comparableTeacherIdentity(teacherName)
-      if (!comparableName) return
-      const ids = persistedIdsByName.get(comparableName) ?? new Set()
-      ids.add(teacherId)
-      persistedIdsByName.set(comparableName, ids)
-    }
-    for (const existing of existingOccupancy) {
-      rememberPersistedTeacher(existing.teacher_id, existing.teacher_name_snapshot)
-      const alternate = alternateTeacherForCell.get(existing)
-      if (alternate) rememberPersistedTeacher(alternate.teacherId, alternate.teacherName)
-    }
-    const candidateToPersistedIds = new Map()
-    for (const teacher of staff) {
-      if (!teacher?.id) continue
-      if (persistedIds.has(teacher.id)) {
-        candidateToPersistedIds.set(teacher.id, teacher.id)
-        continue
-      }
-      const matchingPersistedIds = persistedIdsByName.get(comparableTeacherIdentity(teacher.canonicalName ?? teacher.name))
-      // Formatting-only name variations may bridge to one occupied identity.
-      // Ambiguous active names are deliberately not merged.
-      if (matchingPersistedIds?.size === 1) candidateToPersistedIds.set(teacher.id, matchingPersistedIds.values().next().value)
-    }
-    const candidateIdsByPersistedId = new Map()
-    for (const [candidateId, persistedId] of candidateToPersistedIds) {
-      const ids = candidateIdsByPersistedId.get(persistedId) ?? new Set()
-      ids.add(candidateId)
-      candidateIdsByPersistedId.set(persistedId, ids)
-    }
-    const persistedIdFor = (teacherId, teacherName) => {
-      if (!teacherId) return undefined
-      if (persistedIds.has(teacherId)) return teacherId
-      const matchingPersistedIds = persistedIdsByName.get(comparableTeacherIdentity(teacherName))
-      return matchingPersistedIds?.size === 1 ? matchingPersistedIds.values().next().value : undefined
-    }
+    const candidateTeacherIds = new Set(staff.map((teacher) => teacher?.id).filter(Boolean))
     const addUnavailable = (target, existing, persistedTeacherId) => {
-      const candidateIds = candidateIdsByPersistedId.get(persistedTeacherId)
-      if (!candidateIds) return
-      for (const teacherId of candidateIds) {
-        const key = `${teacherId}|${existing.day}|${existing.period}`
-        if (target.has(key)) continue
-        target.set(key, {
-          teacherId,
-          day: existing.day,
-          period: existing.period,
-          teacherName: candidateNames.get(teacherId) ?? existing.teacher_name_snapshot ?? teacherId,
-          existing: {
-            department: existing.configured_department,
-            year: existing.configured_year,
-            semester: existing.configured_semester,
-            section: existing.section_name,
-            subject: existing.subject,
-          },
-        })
-      }
+      if (!persistedTeacherId || !candidateTeacherIds.has(persistedTeacherId)) return
+      const key = `${persistedTeacherId}|${existing.day}|${existing.period}`
+      if (target.has(key)) return
+      target.set(key, {
+        teacherId: persistedTeacherId,
+        day: existing.day,
+        period: existing.period,
+        teacherName: candidateNames.get(persistedTeacherId) ?? existing.teacher_name_snapshot ?? persistedTeacherId,
+        existing: {
+          department: existing.configured_department,
+          year: existing.configured_year,
+          semester: existing.configured_semester,
+          section: existing.section_name,
+          subject: existing.subject,
+        },
+      })
     }
     for (const existing of existingOccupancy) {
       if (!existing.teacher_id) continue
-      const snapshot = snapshotFor(existing)
-      addUnavailable(unavailable, existing, persistedIdFor(existing.teacher_id, existing.teacher_name_snapshot))
+      addUnavailable(unavailable, existing, existing.teacher_id)
       const alternate = alternateTeacherForCell.get(existing)
-      const alternateName = alternate?.teacherName
-        ?? snapshot.staff?.find((teacher) => teacher.id === existing.teacher_id)?.name
-        ?? existing.teacher_name_snapshot
-      addUnavailable(alternateWeekUnavailable, existing,
-        persistedIdFor(alternate?.teacherId ?? existing.teacher_id, alternateName))
+      addUnavailable(alternateWeekUnavailable, existing, alternate?.teacherId ?? existing.teacher_id)
     }
     return {
       unavailableSlots: [...unavailable.values()],

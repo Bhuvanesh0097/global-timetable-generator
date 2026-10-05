@@ -174,3 +174,103 @@ test('global occupancy uses only the authoritative active timetable version and 
     await testDatabase.cleanup()
   }
 })
+
+test('Placement occupancy uses the alternate teacher assigned to the active saved section by stable ID', async () => {
+  const testDatabase = await createTestPostgresRepository()
+  const repository = testDatabase.repository
+  try {
+    const identity = {
+      department: 'CSE', year: 'III / 3rd Year', semester: 'V / 5th Semester', academicYear: '2026 - 2027',
+    }
+    const staff = [
+      { id: 'placement-teacher', name: 'Placement Teacher' },
+      { id: 'teacher-base', name: 'Base Teacher' },
+      { id: 'alternate-A', name: 'Alternate A' },
+      { id: 'alternate-B', name: 'Alternate B' },
+    ]
+    const configuration = {
+      ...identity,
+      sections: [{ id: 'A' }, { id: 'B' }],
+      staff,
+      subjects: [{
+        id: 'subject-1', code: 'CSE501', name: 'Algorithms', weeklyHours: 47,
+        teacherAssignments: [
+          { sectionId: 'A', teacherId: 'teacher-base' },
+          { sectionId: 'B', teacherId: 'teacher-base' },
+        ],
+      }],
+      placement: {
+        id: 'placement', code: 'PLC', name: 'Placement', enabled: true, weeklyPeriods: 1,
+        teacherAssignments: [
+          { sectionId: 'A', teacherId: 'placement-teacher' },
+          { sectionId: 'B', teacherId: 'placement-teacher' },
+        ],
+      },
+    }
+    const configurationId = await repository.createTimetableConfiguration(configuration)
+    const scheduleFor = (sectionId) => Object.fromEntries(
+      ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'].map((day) => [
+        day,
+        Object.fromEntries(Array.from({ length: 8 }, (_, index) => {
+          const period = index + 1
+          const isPlacement = day === 'Monday' && period === 1
+          return [period, isPlacement
+            ? {
+              itemId: 'placement', code: 'PLC', abbreviation: 'PLC', name: 'Placement',
+              teacherId: 'placement-teacher', kind: 'activity', blockId: `placement-${sectionId}`,
+            }
+            : {
+              itemId: 'subject-1', code: 'CSE501', abbreviation: 'ALG', name: 'Algorithms',
+              teacherId: 'teacher-base', kind: 'core',
+            }]
+        })),
+      ]),
+    )
+    await repository.saveGeneratedTimetableData({
+      configurationId,
+      generationId: 'placement-occupancy-generation',
+      sections: ['A', 'B'].map((sectionId) => ({ sectionId, schedule: scheduleFor(sectionId) })),
+      setupSnapshot: {
+        staff,
+        placementException: {
+          enabled: true,
+          alternateSubjects: [
+            {
+              placementPosition: 1, sectionId: 'A', subjectId: 'alternate-subject-A',
+              subjectKind: 'core', subjectNameSnapshot: 'Alternate Subject A',
+              teacherAssignments: [{ sectionId: 'A', teacherId: 'alternate-A', teacherNameSnapshot: 'Alternate A' }],
+            },
+            {
+              placementPosition: 1, sectionId: 'B', subjectId: 'alternate-subject-B',
+              subjectKind: 'core', subjectNameSnapshot: 'Alternate Subject B',
+              teacherAssignments: [{ sectionId: 'B', teacherId: 'alternate-B', teacherNameSnapshot: 'Alternate B' }],
+            },
+          ],
+        },
+      },
+      validation: {},
+      staff,
+    })
+
+    const occupancy = await repository.getTeacherUnavailableOccupancy({
+      identity: { department: 'IOT', year: 'II / 2nd Year', semester: 'V', academicYear: identity.academicYear },
+      staff: [staff[2], staff[3]],
+    })
+    assert.deepEqual(occupancy.alternateWeekUnavailableSlots
+      .map(({ teacherId, day, period, existing }) => ({
+        teacherId, day, period, section: existing.section,
+      }))
+      .sort((left, right) => left.teacherId.localeCompare(right.teacherId)), [
+      { teacherId: 'alternate-A', day: 'Monday', period: 1, section: 'A' },
+      { teacherId: 'alternate-B', day: 'Monday', period: 1, section: 'B' },
+    ])
+
+    const sameNameDifferentId = await repository.getTeacherUnavailableOccupancy({
+      identity: { department: 'IOT', year: 'II / 2nd Year', semester: 'V', academicYear: identity.academicYear },
+      staff: [{ id: 'alternate-A-renamed', name: 'Alternate A' }],
+    })
+    assert.deepEqual(sameNameDifferentId.alternateWeekUnavailableSlots, [])
+  } finally {
+    await testDatabase.cleanup()
+  }
+})

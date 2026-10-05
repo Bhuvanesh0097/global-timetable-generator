@@ -2,16 +2,23 @@ import { createLogger, defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
 import { createTimetableApiMiddleware } from './backend/timetable-api.mjs'
 import { openTimetableRepository } from './backend/timetable-repository.mjs'
+import { createGenericSchedulerWorkerPool } from './backend/generic-scheduler-worker-pool.mjs'
 
 const logger = createLogger()
 
-function timetableApiPlugin(databaseUrl: string | undefined) {
+function timetableApiPlugin(databaseUrl: string | undefined, schedulerWorkerCount: string | undefined) {
   let repositoryPromise: ReturnType<typeof openTimetableRepository> | undefined
   let apiMiddlewarePromise: Promise<ReturnType<typeof createTimetableApiMiddleware>> | undefined
+  let schedulerPool: ReturnType<typeof createGenericSchedulerWorkerPool> | undefined
   const middleware: ReturnType<typeof createTimetableApiMiddleware> = async (request, response, next) => {
     try {
       repositoryPromise ??= openTimetableRepository({ databaseUrl })
-      apiMiddlewarePromise ??= repositoryPromise.then((repository) => createTimetableApiMiddleware(repository))
+      apiMiddlewarePromise ??= repositoryPromise.then((repository) => createTimetableApiMiddleware(repository, {
+        runGeneration: (input) => {
+          schedulerPool ??= createGenericSchedulerWorkerPool({ workerCount: schedulerWorkerCount })
+          return schedulerPool.run(input)
+        },
+      }))
       await (await apiMiddlewarePromise)(request, response, next)
     } catch (error) {
       logger.error(`Timetable PostgreSQL connection failed: ${String(error)}`)
@@ -21,6 +28,8 @@ function timetableApiPlugin(databaseUrl: string | undefined) {
     }
   }
   const closeRepository = () => {
+    void schedulerPool?.close().catch((error: unknown) => logger.error(`Could not stop timetable scheduler workers: ${String(error)}`))
+    schedulerPool = undefined
     void apiMiddlewarePromise?.then(async () => {
       await (await repositoryPromise)?.close()
       repositoryPromise = undefined
@@ -43,7 +52,7 @@ function timetableApiPlugin(databaseUrl: string | undefined) {
 export default defineConfig(({ mode }) => {
   const environment = loadEnv(mode, '.', '')
   return {
-    plugins: [react(), timetableApiPlugin(environment.DATABASE_URL)],
+    plugins: [react(), timetableApiPlugin(environment.DATABASE_URL, environment.TIMETABLE_SCHEDULER_WORKERS)],
     preview: {
       allowedHosts: ['global-timetable-generator.onrender.com'],
     },

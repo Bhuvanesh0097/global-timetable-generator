@@ -581,6 +581,37 @@ test('saved global teacher occupancy rejects one slot and routes the new timetab
   assert.equal(result.validation.globalTeacherClashes, 0)
 })
 
+test('fixed global teacher occupancy removes blocked candidates before search while retaining a legal alternative', () => {
+  const sharedTeacher = 'global-teacher'
+  const replacementTeacher = 'replacement-teacher'
+  const config = {
+    ...identity,
+    department: 'IOT',
+    sections: [{ id: 'A' }],
+    staff: [
+      { id: sharedTeacher, name: 'Global Teacher' },
+      { id: replacementTeacher, name: 'Replacement Teacher' },
+    ],
+    subjects: [
+      ...coreRows(47, 'restricted', 'R', 'Restricted Subject', [{ sectionId: 'A', teacherId: sharedTeacher }]),
+      { id: 'replacement', code: 'A1', name: 'Replacement Subject', weeklyHours: 1,
+        teacherAssignments: [{ sectionId: 'A', teacherId: replacementTeacher }] },
+    ],
+    rules: { coreDailyMaximum: 8, coreConsecutiveMaximum: 8 },
+    candidateCount: 2,
+    randomSeed: 31,
+  }
+
+  const result = generateGenericTimetable({
+    schedules: [config],
+    unavailableTeacherSlots: [{ teacherId: sharedTeacher, day: 'Monday', period: 3 }],
+  })
+  assertEverySectionIsComplete(result, 1)
+  if (!result.ok) return
+  assert.equal(result.sections[0].schedule.Monday[3].teacherId, replacementTeacher)
+  assert.equal(result.validation.globalTeacherClashes, 0)
+})
+
 test('Placement block routing rejects the full block when its alternate teacher is occupied in one period', () => {
   const config = placementExceptionConfig(2, { startPeriod: 5, otherAlternates: true })
   const result = generateGenericTimetable({

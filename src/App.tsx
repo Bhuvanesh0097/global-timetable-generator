@@ -4,18 +4,17 @@ import {
   FlaskConical, GraduationCap, Plus, Settings2, Sparkles, Star, Trash2, Users,
 } from 'lucide-react'
 import type { CoreSubject, LabAssignment, LabDefinition, OtherSubject, Section, SectionName, SectionSubjectAssignment, SpecialActivity, SpecialActivityAssignment, StaffMember, TimetableSetup, WeekDay } from './models'
-import type { GeneratedSection, SavedTeacherUnavailableSlot, ScheduledCell, TimetableGenerationResult } from './scheduler'
-import { generateGenericTimetable, validateGenericScheduleConfig, validateGenericScheduleEdit } from './generic-scheduler.ts'
-import { randomizeGenericPlacementAlternates, toGenericScheduleConfig } from './generic-schedule-adapter.ts'
+import type { GeneratedSection, ScheduledCell, TimetableGenerationResult } from './scheduler'
+import { validateGenericScheduleConfig, validateGenericScheduleEdit } from './generic-scheduler.ts'
+import { toGenericScheduleConfig } from './generic-schedule-adapter.ts'
 import { cloneGeneratedSections, exchangeGeneratedTimetableCells, getEditableTimetableChoices, updateGeneratedTimetableCell } from './timetable-edit'
 import { TeacherTimetableFeature } from './TeacherTimetable'
 import { ConsolidatedFacultyTimetable } from './ConsolidatedFacultyTimetable'
-import { findTeacherTimetableClashes } from './teacher-timetable'
 import { getGenerateTimetableLabel, getSectionCountLabel, getSectionIds, initializeConfiguredSections } from './section-configuration'
 import { globalStaffMaster } from './staff-identities'
 import { TeacherSelector } from './TeacherSelector'
-import type { GenericGeneratedSection, GenericScheduledAlternateSubject, GenericUnavailableTeacherSlot } from './generic-scheduling-model.ts'
-import { checkSavedTimetableOccupancy, deleteSavedTimetableVersion, listSavedTimetableNavigation, listSavedTimetableVersions, loadSavedTeacherUnavailableSlots, loadSavedTimetableVersion, saveTimetableVersion, setSavedTimetableVersionLock, type SavedTimetableNavigationEntry, type SavedTimetableOccupancyConflict, type SavedTimetableVersionSummary } from './timetable-version-client'
+import type { GenericGeneratedSection, GenericScheduledAlternateSubject, GenericTimetableGenerationResult } from './generic-scheduling-model.ts'
+import { deleteSavedTimetableVersion, generateGenericTimetableOnServer, listSavedTimetableNavigation, listSavedTimetableVersions, loadSavedTeacherUnavailableSlots, loadSavedTimetableVersion, saveTimetableVersion, setSavedTimetableVersionLock, type SavedTimetableNavigationEntry, type SavedTimetableVersionSummary } from './timetable-version-client'
 
 const departments = ['CSE', 'IT', 'AIML', 'ECE', 'EEE', 'IOT', 'RA', 'FT', 'MECH']
 const yearOptions = [
@@ -1601,67 +1600,36 @@ function App() {
       setGenerationResult({ ok: false, code: 'INVALID_INPUT', message: 'Timetable configuration has incomplete or invalid fields.', blockingConstraints: inputIssues })
       return
     }
-    let savedTeacherUnavailableSlots: SavedTeacherUnavailableSlot[] = []
-    let savedAlternateWeekUnavailableSlots: GenericUnavailableTeacherSlot[] = []
-    if (isGenericConfiguration) {
-      try {
-        const savedOccupancy = await loadSavedTeacherUnavailableSlots({
-          identity: {
-            department: setup.academic.department,
-            year: setup.academic.year,
-            semester: setup.academic.semester,
-            academicYear: setup.academic.academicYear,
-          },
-          staff: setup.staff,
-        })
-        if (academicConfigurationKey(selectionRef.current) !== generationSelectionKey) return
-        savedTeacherUnavailableSlots = savedOccupancy.unavailableSlots
-        savedAlternateWeekUnavailableSlots = savedOccupancy.alternateWeekUnavailableSlots
-      } catch (error) {
-        if (academicConfigurationKey(selectionRef.current) !== generationSelectionKey) return
-        setGenerationResult({
-          ok: false,
-          code: 'UNSATISFIABLE',
-          message: 'Saved timetable teacher occupancy could not be loaded, so timetable generation was stopped.',
-          blockingConstraints: [error instanceof Error ? error.message : 'The database occupancy service is unavailable.'],
-        })
-        return
-      }
+    if (!genericScheduleConversion) {
+      setGenerationResult({
+        ok: false,
+        code: 'INVALID_INPUT',
+        message: 'No generic schedule configuration is available.',
+        blockingConstraints: [],
+      })
+      return
     }
-    let generatedRandomPlacementException: TimetableSetup['placementException'] | undefined
-    const generateCandidate = () => {
-      if (!genericScheduleConversion) {
-        return { ok: false as const, code: 'INVALID_INPUT' as const, message: 'No generic schedule configuration is available.', blockingConstraints: [] }
-      }
-      const randomAllocation = genericScheduleConversion.config.placementException?.enabled
-        && genericScheduleConversion.config.placementException.allocationMode === 'random'
-      const attempts = randomAllocation ? 8 : 1
-      let lastResult: ReturnType<typeof generateGenericTimetable> | undefined
-      for (let attempt = 0; attempt < attempts; attempt += 1) {
-        const allocation = randomizeGenericPlacementAlternates(genericScheduleConversion.config)
-        if (allocation.issues.length) {
-          return { ok: false as const, code: 'INVALID_INPUT' as const, message: 'Placement alternate allocation is incomplete.', blockingConstraints: allocation.issues }
-        }
-        const candidateConfig = allocation.config
-        const candidateIssues = validateGenericScheduleConfig(candidateConfig)
-        if (candidateIssues.length) {
-          return { ok: false as const, code: 'INVALID_INPUT' as const, message: 'Placement alternate allocation is invalid.', blockingConstraints: candidateIssues }
-        }
-        const result = generateGenericTimetable({
-          schedules: [candidateConfig],
-          reservedSections: genericReservedSections,
-          unavailableTeacherSlots: savedTeacherUnavailableSlots,
-          alternateWeekUnavailableTeacherSlots: savedAlternateWeekUnavailableSlots,
-          candidateCount: candidateConfig.candidateCount,
-        })
-        if (result.ok) {
-          if (randomAllocation && candidateConfig.placementException) {
-            generatedRandomPlacementException = {
-              enabled: true,
-              allocationMode: 'random',
-              alternateSubjects: candidateConfig.placementException.alternateSubjects.map((alternate) => ({
+
+    let result: GenericTimetableGenerationResult
+    try {
+      const generated = await generateGenericTimetableOnServer({
+        configuration: genericScheduleConversion.config,
+        reservedSections: genericReservedSections,
+      })
+      if (academicConfigurationKey(selectionRef.current) !== generationSelectionKey) return
+      result = generated.result
+      const generatedPlacementException = generated.placementException
+      if (result.ok && generatedPlacementException?.allocationMode === 'random') {
+        setConfigurations((current) => ({
+          ...current,
+          [generationSelectionKey]: {
+            ...(current[generationSelectionKey] ?? setup),
+            placementException: {
+              enabled: generatedPlacementException.enabled,
+              allocationMode: generatedPlacementException.allocationMode,
+              alternateSubjects: generatedPlacementException.alternateSubjects.map((alternate) => ({
                 placementPosition: alternate.placementPosition,
-                sectionId: alternate.sectionId as SectionName,
+                ...(alternate.sectionId ? { sectionId: alternate.sectionId as SectionName } : {}),
                 subjectId: alternate.subjectId,
                 subjectKind: alternate.subjectKind,
                 subjectNameSnapshot: alternate.subjectNameSnapshot,
@@ -1671,103 +1639,21 @@ function App() {
                   teacherNameSnapshot: assignment.teacherNameSnapshot,
                 })),
               })),
-            }
-          }
-          return result
-        }
-        lastResult = result
-      }
-      return lastResult ?? { ok: false as const, code: 'UNSATISFIABLE' as const, message: 'No valid random Placement allocation was found.', blockingConstraints: [] }
-    }
-    let result = generateCandidate()
-    if (result.ok) {
-      const teacherClashes = findTeacherTimetableClashes(result.sections)
-      if (teacherClashes.length > 0) {
-        setGenerationResult({
-          ok: false,
-          code: 'UNSATISFIABLE',
-          message: 'The generated timetable contains simultaneous assignments for a teacher.',
-          blockingConstraints: teacherClashes.map(({ teacherId, day, period, entries }) => {
-            const teacherName = setup.staff.find((person) => person.id === teacherId)?.name ?? teacherId
-            const sections = entries.map(({ sectionId, cell }) => `Section ${sectionId} — ${cell.abbreviation || cell.name}`).join(' / ')
-            return `${teacherName} is assigned to ${sections} at ${day} P${period}.`
-          }),
-        })
-        return
-      }
-      let savedOccupancyConflicts: SavedTimetableOccupancyConflict[] = []
-      try {
-        for (let attempt = 0; attempt < 8; attempt += 1) {
-          const occupancy = await checkSavedTimetableOccupancy({
-            identity: {
-              department: setup.academic.department,
-              year: setup.academic.year,
-              semester: setup.academic.semester,
-              academicYear: setup.academic.academicYear,
             },
-            sections: result.sections,
-            staff: setup.staff,
-          })
-          if (academicConfigurationKey(selectionRef.current) !== generationSelectionKey) return
-          if (occupancy.conflicts.length === 0) {
-            savedOccupancyConflicts = []
-            break
-          }
-          savedOccupancyConflicts = occupancy.conflicts
-          if (attempt < 7) {
-            if (isGenericConfiguration) {
-              const refreshedOccupancy = await loadSavedTeacherUnavailableSlots({
-                identity: {
-                  department: setup.academic.department,
-                  year: setup.academic.year,
-                  semester: setup.academic.semester,
-                  academicYear: setup.academic.academicYear,
-                },
-                staff: setup.staff,
-              })
-              if (academicConfigurationKey(selectionRef.current) !== generationSelectionKey) return
-              savedTeacherUnavailableSlots = refreshedOccupancy.unavailableSlots
-              savedAlternateWeekUnavailableSlots = refreshedOccupancy.alternateWeekUnavailableSlots
-            }
-            const nextCandidate = generateCandidate()
-            if (!nextCandidate.ok) break
-            result = nextCandidate
-          }
-        }
-      } catch (error) {
-        if (academicConfigurationKey(selectionRef.current) !== generationSelectionKey) return
-        result = {
-          ok: false,
-          code: 'UNSATISFIABLE',
-          message: 'Saved timetable occupancy could not be checked, so this candidate was not accepted.',
-          blockingConstraints: [error instanceof Error ? error.message : 'The database occupancy service is unavailable.'],
-        }
+          },
+        }))
       }
-      if (result.ok && savedOccupancyConflicts.length > 0) {
-        result = {
-          ok: false,
-          code: 'UNSATISFIABLE',
-          message: 'Every generated candidate conflicts with a saved timetable teacher assignment.',
-          blockingConstraints: savedOccupancyConflicts.map(({ teacherName, day, period, week, existing, candidate }) => [
-            `Teacher: ${teacherName}`,
-            `Conflict: ${day} P${period}${week === 'alternate' ? ' (alternate week)' : ''}`,
-            `Existing: ${existing.department} · ${existing.year} · ${existing.semester} · Section ${existing.section} — ${existing.subject}`,
-            `Candidate: ${candidate.department} · ${candidate.year} · ${candidate.semester} · Section ${candidate.section} — ${candidate.subject}`,
-          ].join('\n')),
-        }
+    } catch (error) {
+      if (academicConfigurationKey(selectionRef.current) !== generationSelectionKey) return
+      result = {
+        ok: false,
+        code: 'UNSATISFIABLE',
+        message: 'Timetable generation failed, so no timetable was returned.',
+        blockingConstraints: [error instanceof Error ? error.message : 'The timetable generation service is unavailable.'],
       }
     }
     if (academicConfigurationKey(selectionRef.current) !== generationSelectionKey) return
     if (result.ok) {
-      if (generatedRandomPlacementException) {
-        setConfigurations((current) => ({
-          ...current,
-          [generationSelectionKey]: {
-            ...(current[generationSelectionKey] ?? setup),
-            placementException: generatedRandomPlacementException,
-          },
-        }))
-      }
       if (isGenericConfiguration) {
         setGeneratedTargetSchedules((current) => ({
           ...current,

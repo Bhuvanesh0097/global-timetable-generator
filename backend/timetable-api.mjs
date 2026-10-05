@@ -1,3 +1,5 @@
+import { runGenericTimetableGeneration } from './generic-scheduler-worker-pool.mjs'
+
 const maximumBodyBytes = 2 * 1024 * 1024
 const supportedDays = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
 const setupArrayFields = [
@@ -12,14 +14,14 @@ function sendJson(response, statusCode, value) {
   response.end(JSON.stringify(value))
 }
 
-function readJsonBody(request) {
+function readJsonBody(request, requestName = 'save request') {
   return new Promise((resolve, reject) => {
     const chunks = []
     let length = 0
     request.on('data', (chunk) => {
       length += chunk.length
       if (length > maximumBodyBytes) {
-        reject(new Error('The save request is too large.'))
+        reject(new Error(`The ${requestName} is too large.`))
         request.destroy()
         return
       }
@@ -29,7 +31,7 @@ function readJsonBody(request) {
       try {
         resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')))
       } catch {
-        reject(new Error('The save request is not valid JSON.'))
+        reject(new Error(`The ${requestName} is not valid JSON.`))
       }
     })
     request.on('error', reject)
@@ -49,12 +51,122 @@ function identityFromQuery(url) {
   return identity
 }
 
+function generationIdentity(configuration) {
+  const identity = {
+    department: configuration?.department,
+    year: configuration?.year,
+    semester: configuration?.semester,
+    academicYear: configuration?.academicYear,
+  }
+  if (Object.values(identity).some((field) => typeof field !== 'string' || !field.trim())) {
+    throw new Error('Department, year, semester and academic year are required for timetable generation.')
+  }
+  if (!Array.isArray(configuration.sections) || configuration.sections.length === 0
+    || !Array.isArray(configuration.staff)
+    || configuration.staff.some((teacher) => !teacher || !String(teacher.id ?? '').trim()
+      || !String(teacher.name ?? teacher.canonicalName ?? '').trim())) {
+    throw new Error('Timetable generation requires configured sections and staff with stable teacher IDs.')
+  }
+  return identity
+}
+
+function generationStaff(configuration) {
+  const teacherIds = new Set()
+  const items = [
+    ...(Array.isArray(configuration.subjects) ? configuration.subjects : []),
+    ...(Array.isArray(configuration.otherSubjects) ? configuration.otherSubjects : []),
+    ...(Array.isArray(configuration.labs) ? configuration.labs : []),
+    ...(configuration.placement ? [configuration.placement] : []),
+    ...(Array.isArray(configuration.specialActivities) ? configuration.specialActivities : []),
+  ]
+  for (const item of items) {
+    for (const assignment of Array.isArray(item?.teacherAssignments) ? item.teacherAssignments : []) {
+      if (assignment?.teacherId) teacherIds.add(assignment.teacherId)
+    }
+  }
+  for (const alternate of Array.isArray(configuration.placementException?.alternateSubjects)
+    ? configuration.placementException.alternateSubjects : []) {
+    for (const assignment of Array.isArray(alternate?.teacherAssignments) ? alternate.teacherAssignments : []) {
+      if (assignment?.teacherId) teacherIds.add(assignment.teacherId)
+    }
+  }
+  return configuration.staff.filter((teacher) => teacherIds.has(teacher.id))
+}
+
+function generationConflictMessage(conflicts) {
+  return conflicts.map(({ teacherName, day, period, week, existing, candidate }) => [
+    `Teacher: ${teacherName}`,
+    `Conflict: ${day} P${period}${week === 'alternate' ? ' (alternate week)' : ''}`,
+    `Existing: ${existing.department} · ${existing.year} · ${existing.semester} · Section ${existing.section} — ${existing.subject}`,
+    `Candidate: ${candidate.department} · ${candidate.year} · ${candidate.semester} · Section ${candidate.section} — ${candidate.subject}`,
+  ].join('\n'))
+}
+
 /** Same-origin JSON endpoints backed by the PostgreSQL timetable repository. */
-export function createTimetableApiMiddleware(repository) {
+export function createTimetableApiMiddleware(repository, {
+  runGeneration = runGenericTimetableGeneration,
+} = {}) {
   return async (request, response, next) => {
     const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`)
     const pathname = url.pathname.replace(/^\/api(?=\/|$)/, '')
     try {
+      if (request.method === 'POST' && pathname === '/timetable/generate') {
+        const body = await readJsonBody(request, 'generation request')
+        const { configuration, reservedSections = [] } = body ?? {}
+        if (!configuration || typeof configuration !== 'object' || Array.isArray(configuration)
+          || !Array.isArray(reservedSections)) {
+          sendJson(response, 400, { error: 'A scheduler configuration and reserved sections are required.' })
+          return
+        }
+        const identity = generationIdentity(configuration)
+        const occupancyStaff = generationStaff(configuration)
+        const maximumAttempts = 8
+        let lastOccupancyConflicts = []
+
+        for (let attempt = 0; attempt < maximumAttempts; attempt += 1) {
+          const occupancy = await repository.getTeacherUnavailableOccupancy({
+            identity,
+            staff: occupancyStaff,
+          })
+          const generated = await runGeneration({
+            configuration,
+            reservedSections,
+            unavailableTeacherSlots: occupancy.unavailableSlots,
+            alternateWeekUnavailableTeacherSlots: occupancy.alternateWeekUnavailableSlots,
+          })
+          if (!generated?.result || typeof generated.result.ok !== 'boolean') {
+            throw new Error('The timetable scheduler returned an invalid response.')
+          }
+          if (!generated.result.ok) {
+            sendJson(response, 200, { result: generated.result })
+            return
+          }
+
+          lastOccupancyConflicts = await repository.getTeacherGenerationOccupancyConflicts({
+            identity,
+            sections: generated.result.sections,
+            staff: occupancyStaff,
+          })
+          if (lastOccupancyConflicts.length === 0) {
+            sendJson(response, 200, {
+              result: generated.result,
+              ...(generated.placementException ? { placementException: generated.placementException } : {}),
+            })
+            return
+          }
+        }
+
+        sendJson(response, 200, {
+          result: {
+            ok: false,
+            code: 'UNSATISFIABLE',
+            message: 'Every generated candidate conflicts with a saved timetable teacher assignment.',
+            blockingConstraints: generationConflictMessage(lastOccupancyConflicts),
+          },
+        })
+        return
+      }
+
       if (request.method === 'GET' && pathname === '/timetable-versions') {
         const identity = identityFromQuery(url)
         const versions = (await repository.getSavedTimetableNavigation()).filter((version) =>
@@ -257,6 +369,15 @@ export function createTimetableApiMiddleware(repository) {
 
       next?.()
     } catch (error) {
+      if (error?.code === 'SCHEDULER_CAPACITY' || error?.code === 'SCHEDULER_UNAVAILABLE') {
+        sendJson(response, 503, { error: error.message, code: error.code })
+        return
+      }
+      if (error?.code === 'SCHEDULER_WORKER_FAILED') {
+        console.error('Timetable scheduler worker failed:', error)
+        sendJson(response, 500, { error: 'The timetable scheduler worker failed. Please try again.', code: error.code })
+        return
+      }
       const conflict = /locked|unlock|cannot be changed|cannot be deleted|inconsistent section version states/i.test(error?.message ?? '')
       const notFound = /was not found/i.test(error?.message ?? '')
       if (error?.code === 'TEACHER_OCCUPANCY_CONFLICT') {

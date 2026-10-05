@@ -1,6 +1,9 @@
 import type { TimetableSetup } from './models'
 import type { GeneratedSection, SavedTeacherUnavailableSlot, TimetableValidationSummary } from './scheduler'
-import type { GenericGeneratedSection, GenericScheduleConfig, GenericTimetableValidationSummary, GenericUnavailableTeacherSlot } from './generic-scheduling-model.ts'
+import type {
+  GenericGeneratedSection, GenericPlacementExceptionConfig, GenericScheduleConfig,
+  GenericTimetableGenerationResult, GenericTimetableValidationSummary, GenericUnavailableTeacherSlot,
+} from './generic-scheduling-model.ts'
 
 export interface SavedTimetableVersionSummary {
   versionId: string
@@ -39,6 +42,11 @@ export interface SavedTimetableOccupancyConflict {
   week?: 'alternate'
   existing: { department: string; year: string; semester: string; section: string; subject: string }
   candidate: { department: string; year: string; semester: string; section: string; subject: string }
+}
+
+export interface GenericTimetableGenerationResponse {
+  result: GenericTimetableGenerationResult
+  placementException?: GenericPlacementExceptionConfig
 }
 
 async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
@@ -128,6 +136,17 @@ export function loadSavedTeacherUnavailableSlots(input: {
   alternateWeekUnavailableSlots: GenericUnavailableTeacherSlot[]
 }> {
   return apiRequest('/api/timetable-teacher-occupancy', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+}
+
+export function generateGenericTimetableOnServer(input: {
+  configuration: GenericScheduleConfig
+  reservedSections: GenericGeneratedSection[]
+}): Promise<GenericTimetableGenerationResponse> {
+  return apiRequest('/api/timetable/generate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
