@@ -1278,6 +1278,7 @@ function App() {
     setEditingStaffId(null)
   }
   const [openSection, setOpenSection] = useState<SectionKey | null>('academic')
+  const [isGenerating, setIsGenerating] = useState(false)
   const [generationResult, setGenerationResult] = useState<TimetableGenerationResult | GenericTimetableGenerationResult | null>(null)
   const [generationId, setGenerationId] = useState<string | null>(null)
   const [savedGenerationId, setSavedGenerationId] = useState<string | null>(null)
@@ -1585,9 +1586,11 @@ function App() {
   const generate = async () => {
     if (!canGenerate || generationRequestInFlightRef.current) return
     generationRequestInFlightRef.current = true
+    setIsGenerating(true)
     try {
       await performGeneration()
     } finally {
+      setIsGenerating(false)
       generationRequestInFlightRef.current = false
     }
   }
@@ -2016,7 +2019,8 @@ function App() {
       </div>
 
       <div className="generate-area">
-        <button className="generate-button" onClick={generate} disabled={!canGenerate}><Sparkles size={18} /> {getGenerateTimetableLabel(sectionIds)}</button>
+        <button className="generate-button" onClick={generate} disabled={!canGenerate || isGenerating}><Sparkles size={18} /> {isGenerating ? 'Generating…' : getGenerateTimetableLabel(sectionIds)}</button>
+        {isGenerating && <p role="status">Generating timetable, please wait…</p>}
         <p>{targetNeedsConfiguration
           ? 'Add curriculum rows and assign staff to configure this timetable.'
           : canGenerate
@@ -2065,7 +2069,9 @@ function App() {
                 : generationResult.code === 'SCHEDULER_WORKER_FAILED' || generationResult.code === 'SCHEDULER_UNAVAILABLE'
                   ? 'The scheduler service could not complete the request.'
                   : 'Timetable could not be generated with the current constraints.'}</strong>{!generationResult.ok ? <ul>{generationResult.blockingConstraints.map((constraint) => <li key={constraint}>{constraint}</li>)}</ul> : <p>{incompleteGenerationMessage}</p>}</div>
-          : <p className="no-timetable-placeholder">No timetable generated yet.</p>}
+          : isGenerating
+            ? null
+            : <p className="no-timetable-placeholder">No timetable generated yet.</p>}
       <ConsolidatedFacultyTimetable />
       </main>
     </div>
