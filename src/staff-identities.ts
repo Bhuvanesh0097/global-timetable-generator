@@ -92,4 +92,5 @@ export const globalStaffMaster: StaffMember[] = [
   { id: 'ST080', name: 'Ms. S. Meenambigai' },
   { id: 'ST081', name: 'Mr. Vimal H' },
   { id: 'ST082', name: 'Dr. D. Tiroutchelvame' },
+  { id: 'ST083', name: 'MR. S. GANESHKUMAR' },
 ]
