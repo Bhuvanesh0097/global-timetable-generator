@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { buildTeacherTimetable, findTeacherTimetableClashes, teacherTimetableColumns } from '../src/teacher-timetable.ts'
+import { buildTeacherTimetable, filterTeacherTimetableTeachers, findTeacherTimetableClashes, getTeachersUsedInTimetable, teacherTimetableColumns } from '../src/teacher-timetable.ts'
 import { globalStaffIds } from '../src/staff-identities.ts'
 
 const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
@@ -29,6 +29,102 @@ test('teacher timetable combines only matching generated assignments across sect
   assert.deepEqual(timetable.Monday[3], [])
   assert.deepEqual(timetable.Saturday[8], [])
   assert.deepEqual(buildTeacherTimetable(generated, 'staff-2').Monday[3].map(({ sectionId, cell: assignedCell }) => [sectionId, assignedCell.abbreviation]), [['A', 'CN']])
+})
+
+test('teacher options include only occupied identities from the current timetable', () => {
+  const generated = [
+    section('A', {
+      Monday: {
+        1: cell('staff-used', 'core-1', 'C1'),
+        2: {
+          ...cell('placement-teacher', 'placement', 'Placement', 'Placement'),
+          alternateSubject: {
+            subjectId: 'core-2',
+            subjectKind: 'core',
+            code: 'C2',
+            abbreviation: 'C2',
+            name: 'Alternate Core',
+            teacherId: 'alternate-teacher',
+            teacherNameSnapshot: 'Alternate Name',
+          },
+        },
+      },
+    }),
+    section('B', { Tuesday: { 3: cell('staff-same-name-different-id', 'core-3', 'C3') } }),
+    section('C', { Wednesday: { 4: undefined } }),
+  ]
+  const staff = [
+    { id: 'staff-used', name: 'Current Teacher' },
+    { id: 'placement-teacher', name: 'Placement Teacher' },
+    { id: 'alternate-teacher', name: 'Canonical Alternate Name' },
+    { id: 'staff-same-name-different-id', name: 'Current Teacher' },
+    { id: 'unused-staff', name: 'Unused Teacher' },
+    { id: 'no-cells', name: 'Empty Teacher' },
+  ]
+
+  assert.deepEqual(getTeachersUsedInTimetable(generated, staff), [
+    { id: 'staff-used', name: 'Current Teacher' },
+    { id: 'placement-teacher', name: 'Placement Teacher' },
+    { id: 'alternate-teacher', name: 'Canonical Alternate Name' },
+    { id: 'staff-same-name-different-id', name: 'Current Teacher' },
+  ])
+})
+
+test('teacher search matches only relevant teachers by name or stable ID', () => {
+  const relevantTeachers = [
+    { id: 'ST003', name: 'Mrs. R. Indumathi' },
+    { id: 'ST004', name: 'Other Teacher' },
+  ]
+
+  assert.deepEqual(filterTeacherTimetableTeachers(relevantTeachers, 'ind'), [relevantTeachers[0]])
+  assert.deepEqual(filterTeacherTimetableTeachers(relevantTeachers, 'st003'), [relevantTeachers[0]])
+  assert.deepEqual(filterTeacherTimetableTeachers(relevantTeachers, 'unrelated global staff'), [])
+})
+
+test('teacher options follow the active timetable when the academic context changes', () => {
+  const iotSections = [section('A', { Monday: { 1: cell('iot-teacher', 'iot-core', 'IOT') } })]
+  const cseSections = [section('A', { Monday: { 1: cell('cse-teacher', 'cse-core', 'CSE') } })]
+  const staff = [
+    { id: 'iot-teacher', name: 'IOT Teacher' },
+    { id: 'cse-teacher', name: 'CSE Teacher' },
+    { id: 'previous-context-only', name: 'Previous Context Teacher' },
+  ]
+
+  assert.deepEqual(getTeachersUsedInTimetable(iotSections, staff), [{ id: 'iot-teacher', name: 'IOT Teacher' }])
+  assert.deepEqual(getTeachersUsedInTimetable(cseSections, staff), [{ id: 'cse-teacher', name: 'CSE Teacher' }])
+})
+
+test('alternate-week teacher receives the alternate subject in the existing teacher timetable', () => {
+  const generated = [section('A', {
+    Monday: {
+      2: {
+        ...cell('placement-teacher', 'placement', 'Placement'),
+        alternateSubject: {
+          subjectId: 'core-1',
+          subjectKind: 'core',
+          code: 'C1',
+          abbreviation: 'C1',
+          name: 'Core Subject',
+          teacherId: 'alternate-teacher',
+          teacherNameSnapshot: 'Alternate Teacher',
+        },
+      },
+    },
+  })]
+
+  assert.deepEqual(buildTeacherTimetable(generated, 'alternate-teacher').Monday[2], [{
+    sectionId: 'A',
+    alternateWeek: true,
+    cell: {
+      ...generated[0].schedule.Monday[2],
+      itemId: 'core-1',
+      code: 'C1',
+      abbreviation: 'C1',
+      name: 'Core Subject',
+      teacherId: 'alternate-teacher',
+      kind: 'core',
+    },
+  }])
 })
 
 test('same subject and slot remain separate when different staff teach across sections', () => {

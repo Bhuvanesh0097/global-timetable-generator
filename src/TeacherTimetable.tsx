@@ -1,7 +1,7 @@
-import { useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { TimetableSetup } from './models'
 import type { GeneratedSection } from './scheduler'
-import { buildTeacherTimetable, findTeacherTimetableClashes, teacherTimetableColumns, teacherTimetableDays } from './teacher-timetable'
+import { buildTeacherTimetable, filterTeacherTimetableTeachers, findTeacherTimetableClashes, getTeachersUsedInTimetable, teacherTimetableColumns, teacherTimetableDays } from './teacher-timetable'
 import { buildTeacherExportPayload, createTeacherExportXmp, embedTeacherMetadataInJpeg, embedTeacherMetadataInPng } from './teacher-export-metadata'
 
 function canvasBlob(canvas: HTMLCanvasElement, type: string, quality?: number): Promise<Blob> {
@@ -22,12 +22,22 @@ function downloadBlob(blob: Blob, filename: string): void {
 
 export function TeacherTimetableFeature({ setup, sections }: { setup: TimetableSetup; sections: GeneratedSection[] }) {
   const [teacherId, setTeacherId] = useState('')
+  const [teacherSearch, setTeacherSearch] = useState('')
   const [exporting, setExporting] = useState(false)
   const [exportError, setExportError] = useState<string | null>(null)
   const documentRef = useRef<HTMLElement | null>(null)
-  const teacher = setup.staff.find((person) => person.id === teacherId)
+  const relevantTeachers = useMemo(() => getTeachersUsedInTimetable(sections, setup.staff), [sections, setup.staff])
+  const filteredTeachers = useMemo(() => filterTeacherTimetableTeachers(relevantTeachers, teacherSearch), [relevantTeachers, teacherSearch])
+  const teacher = relevantTeachers.find((person) => person.id === teacherId)
   const timetable = teacher ? buildTeacherTimetable(sections, teacher.id) : null
   const teacherClashes = findTeacherTimetableClashes(sections)
+
+  useEffect(() => {
+    if (teacherId && !relevantTeachers.some((person) => person.id === teacherId)) {
+      setTeacherId('')
+      setExportError(null)
+    }
+  }, [relevantTeachers, teacherId])
 
   const capture = async () => {
     const element = documentRef.current
@@ -125,13 +135,25 @@ export function TeacherTimetableFeature({ setup, sections }: { setup: TimetableS
   return <details className="teacher-feature">
     <summary>Teacher-wise Timetable</summary>
     <div className="teacher-feature-content">
-      <label className="teacher-select-field">
-        <span>Select Staff</span>
-        <select value={teacherId} onChange={(event) => { setTeacherId(event.target.value); setExportError(null) }}>
-          <option value="">Select staff member</option>
-          {setup.staff.map((person) => <option key={person.id} value={person.id}>{person.name}</option>)}
-        </select>
-      </label>
+      {relevantTeachers.length > 0 ? <>
+        <label className="teacher-select-field">
+          <span>Search teacher name or ID</span>
+          <input
+            type="search"
+            value={teacherSearch}
+            placeholder="Search teacher name or ID"
+            onChange={(event) => setTeacherSearch(event.target.value)}
+          />
+        </label>
+        <label className="teacher-select-field">
+          <span>Select Staff</span>
+          <select value={teacher ? teacherId : ''} onChange={(event) => { setTeacherId(event.target.value); setExportError(null) }}>
+            <option value="">Select staff member</option>
+            {filteredTeachers.map((person) => <option key={person.id} value={person.id}>{person.name} · {person.id}</option>)}
+          </select>
+        </label>
+        {teacherSearch.trim() && filteredTeachers.length === 0 && <p role="status">No teachers match your search.</p>}
+      </> : <p role="status">No teachers are assigned in this timetable.</p>}
 
       {teacherClashes.length > 0 && <div className="teacher-clash-error" role="alert">
         <strong>Invalid generated timetable: simultaneous teacher assignments were detected.</strong>
@@ -175,7 +197,7 @@ export function TeacherTimetableFeature({ setup, sections }: { setup: TimetableS
                   const entries = timetable[day][period]
                   return <td className={entries.length ? 'teacher-busy-cell' : 'teacher-free-cell'} key={period}>
                     {entries.length
-                      ? entries.map(({ sectionId, cell }, index) => <span key={`${sectionId}-${cell.itemId}-${index}`}><strong>Section {sectionId}</strong><b>{cell.abbreviation || cell.name}{cell.isCoreTest ? ' (T)' : ''}</b>{cell.name !== cell.abbreviation && <small>{cell.name}</small>}</span>)
+                      ? entries.map(({ sectionId, cell, alternateWeek }, index) => <span key={`${sectionId}-${cell.itemId}-${index}`}><strong>Section {sectionId}</strong><b>{cell.abbreviation || cell.name}{cell.isCoreTest ? ' (T)' : ''}</b>{cell.name !== cell.abbreviation && <small>{cell.name}</small>}{alternateWeek && <small>Alternate week</small>}</span>)
                       : 'FREE'}
                   </td>
                 })}

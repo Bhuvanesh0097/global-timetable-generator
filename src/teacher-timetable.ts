@@ -1,4 +1,4 @@
-import type { SectionName, WeekDay } from './models'
+import type { SectionName, StaffMember, WeekDay } from './models'
 import type { GeneratedSection, ScheduledCell } from './scheduler'
 
 export const teacherTimetableDays: WeekDay[] = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
@@ -20,15 +20,85 @@ export const teacherTimetableColumns = [
 export interface TeacherTimetableEntry {
   sectionId: SectionName
   cell: ScheduledCell
+  alternateWeek?: boolean
 }
 
 export type TeacherTimetable = Record<WeekDay, Record<number, TeacherTimetableEntry[]>>
+
+export interface TeacherTimetableTeacher {
+  id: string
+  name: string
+}
+
+interface AlternateSubjectCell extends ScheduledCell {
+  alternateSubject?: {
+    subjectId: string
+    subjectKind: 'core' | 'other'
+    code: string
+    abbreviation: string
+    name: string
+    teacherId: string
+    teacherNameSnapshot?: string
+  }
+}
 
 export interface TeacherTimetableClash {
   teacherId: string
   day: WeekDay
   period: number
   entries: TeacherTimetableEntry[]
+}
+
+/** Return only stable teacher identities represented by occupied timetable cells. */
+export function getTeachersUsedInTimetable(
+  generatedSections: GeneratedSection[],
+  staff: StaffMember[],
+): TeacherTimetableTeacher[] {
+  const usedTeacherNames = new Map<string, string>()
+  for (const section of generatedSections) {
+    for (const day of teacherTimetableDays) {
+      for (const period of teacherTimetablePeriods) {
+        const cell = section.schedule[day]?.[period] as AlternateSubjectCell | undefined
+        if (cell?.teacherId) usedTeacherNames.set(cell.teacherId, usedTeacherNames.get(cell.teacherId) ?? '')
+        const alternate = cell?.alternateSubject
+        if (alternate?.teacherId) {
+          usedTeacherNames.set(alternate.teacherId, usedTeacherNames.get(alternate.teacherId) || alternate.teacherNameSnapshot || '')
+        }
+      }
+    }
+  }
+
+  const staffById = new Map<string, StaffMember>()
+  for (const person of staff) {
+    if (person.id && !staffById.has(person.id)) staffById.set(person.id, person)
+  }
+
+  const teachers = [...usedTeacherNames].map(([id, snapshotName]) => ({
+    id,
+    name: staffById.get(id)?.name || snapshotName || id,
+  }))
+  const teachersById = new Map(teachers.map((teacher) => [teacher.id, teacher]))
+  const orderedTeacherIds = new Set<string>()
+  return [
+    ...staff.flatMap((person) => {
+      const teacher = teachersById.get(person.id)
+      if (!teacher || orderedTeacherIds.has(person.id)) return []
+      orderedTeacherIds.add(person.id)
+      return [teacher]
+    }),
+    ...teachers.filter((person) => !orderedTeacherIds.has(person.id)),
+  ]
+}
+
+export function filterTeacherTimetableTeachers(
+  teachers: TeacherTimetableTeacher[],
+  query: string,
+): TeacherTimetableTeacher[] {
+  const normalizedQuery = query.trim().toLocaleLowerCase()
+  if (!normalizedQuery) return teachers
+  return teachers.filter(({ id, name }) =>
+    name.toLocaleLowerCase().includes(normalizedQuery)
+    || id.toLocaleLowerCase().includes(normalizedQuery))
 }
 
 /** Safety check for a staff member assigned to multiple generated sections at once. */
@@ -59,8 +129,24 @@ export function buildTeacherTimetable(generatedSections: GeneratedSection[], tea
   for (const section of generatedSections) {
     for (const day of teacherTimetableDays) {
       for (const period of teacherTimetablePeriods) {
-        const cell = section.schedule[day]?.[period]
+        const cell = section.schedule[day]?.[period] as AlternateSubjectCell | undefined
         if (cell?.teacherId === teacherId) timetable[day][period].push({ sectionId: section.sectionId, cell })
+        const alternate = cell?.alternateSubject
+        if (alternate?.teacherId === teacherId) {
+          timetable[day][period].push({
+            sectionId: section.sectionId,
+            alternateWeek: true,
+            cell: {
+              ...cell,
+              itemId: alternate.subjectId,
+              code: alternate.code,
+              abbreviation: alternate.abbreviation,
+              name: alternate.name,
+              teacherId: alternate.teacherId,
+              kind: alternate.subjectKind,
+            },
+          })
+        }
       }
     }
   }
