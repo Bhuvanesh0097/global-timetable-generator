@@ -6,19 +6,29 @@ import { createGenericSchedulerWorkerPool } from './backend/generic-scheduler-wo
 
 const logger = createLogger()
 
-function timetableApiPlugin(
-  databaseUrl: string | undefined,
-  schedulerWorkerCount: string | undefined,
-  schedulerQueueSize: string | undefined,
-  schedulerTimeoutMs: string | undefined,
-  schedulerQueueWaitTimeoutMs: string | undefined,
-) {
+type TimetableApiPluginOptions = {
+  databaseUrl?: string
+  schedulerWorkerCount?: string
+  schedulerQueueSize?: string
+  schedulerTimeoutMs?: string
+  schedulerQueueWaitTimeoutMs?: string
+  repository?: Awaited<ReturnType<typeof openTimetableRepository>>
+}
+
+export function createTimetableApiPlugin({
+  databaseUrl,
+  schedulerWorkerCount,
+  schedulerQueueSize,
+  schedulerTimeoutMs,
+  schedulerQueueWaitTimeoutMs,
+  repository,
+}: TimetableApiPluginOptions = {}) {
   let repositoryPromise: ReturnType<typeof openTimetableRepository> | undefined
   let apiMiddlewarePromise: Promise<ReturnType<typeof createTimetableApiMiddleware>> | undefined
   let schedulerPool: ReturnType<typeof createGenericSchedulerWorkerPool> | undefined
   const middleware: ReturnType<typeof createTimetableApiMiddleware> = async (request, response, next) => {
     try {
-      repositoryPromise ??= openTimetableRepository({ databaseUrl })
+      repositoryPromise ??= repository ? Promise.resolve(repository) : openTimetableRepository({ databaseUrl })
       apiMiddlewarePromise ??= repositoryPromise.then((repository) => createTimetableApiMiddleware(repository, {
         runGeneration: (input) => {
           schedulerPool ??= createGenericSchedulerWorkerPool({
@@ -63,13 +73,13 @@ function timetableApiPlugin(
 export default defineConfig(({ mode }) => {
   const environment = loadEnv(mode, '.', '')
   return {
-    plugins: [react(), timetableApiPlugin(
-      environment.DATABASE_URL,
-      environment.TIMETABLE_SCHEDULER_WORKERS,
-      environment.TIMETABLE_SCHEDULER_QUEUE_SIZE,
-      environment.TIMETABLE_SCHEDULER_TIMEOUT_MS,
-      environment.TIMETABLE_SCHEDULER_QUEUE_WAIT_TIMEOUT_MS,
-    )],
+    plugins: [react(), createTimetableApiPlugin({
+      databaseUrl: environment.DATABASE_URL,
+      schedulerWorkerCount: environment.TIMETABLE_SCHEDULER_WORKERS,
+      schedulerQueueSize: environment.TIMETABLE_SCHEDULER_QUEUE_SIZE,
+      schedulerTimeoutMs: environment.TIMETABLE_SCHEDULER_TIMEOUT_MS,
+      schedulerQueueWaitTimeoutMs: environment.TIMETABLE_SCHEDULER_QUEUE_WAIT_TIMEOUT_MS,
+    })],
     preview: {
       allowedHosts: ['global-timetable-generator.onrender.com'],
     },

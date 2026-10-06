@@ -14,7 +14,7 @@ import { getGenerateTimetableLabel, getSectionCountLabel, getSectionIds, initial
 import { globalStaffMaster } from './staff-identities'
 import { TeacherSelector } from './TeacherSelector'
 import type { GenericGeneratedSection, GenericScheduledAlternateSubject, GenericTimetableGenerationResult } from './generic-scheduling-model.ts'
-import { deleteSavedTimetableVersion, generateGenericTimetableOnServer, listSavedTimetableNavigation, listSavedTimetableVersions, loadSavedTeacherUnavailableSlots, loadSavedTimetableVersion, saveTimetableVersion, setSavedTimetableVersionLock, type SavedTimetableNavigationEntry, type SavedTimetableVersionSummary } from './timetable-version-client'
+import { acknowledgeGeneratedTimetable, deleteSavedTimetableVersion, generateGenericTimetableOnServer, listSavedTimetableNavigation, listSavedTimetableVersions, loadSavedTeacherUnavailableSlots, loadSavedTimetableVersion, saveTimetableVersion, setSavedTimetableVersionLock, type SavedTimetableNavigationEntry, type SavedTimetableVersionSummary } from './timetable-version-client'
 
 const departments = ['CSE', 'IT', 'AIML', 'ECE', 'EEE', 'IOT', 'RA', 'FT', 'MECH']
 const yearOptions = [
@@ -1144,6 +1144,7 @@ function App() {
       })
       setGenerationResult(null)
       setGenerationId(null)
+      setGenerationJobId(null)
       setOpenedSavedSetup(null)
       setOpenedSavedVersionId(null)
       setOpenedSavedSectionId(null)
@@ -1268,6 +1269,7 @@ function App() {
     setSelection((current) => ({ ...current, ...patch }))
     setGenerationResult(null)
     setGenerationId(null)
+    setGenerationJobId(null)
     setOpenedSavedSetup(null)
     setOpenedSavedVersionId(null)
     setOpenedSavedSectionId(null)
@@ -1281,6 +1283,7 @@ function App() {
   const [isGenerating, setIsGenerating] = useState(false)
   const [generationResult, setGenerationResult] = useState<TimetableGenerationResult | GenericTimetableGenerationResult | null>(null)
   const [generationId, setGenerationId] = useState<string | null>(null)
+  const [generationJobId, setGenerationJobId] = useState<string | null>(null)
   const [savedGenerationId, setSavedGenerationId] = useState<string | null>(null)
   const [savedVersions, setSavedVersions] = useState<SavedTimetableVersionSummary[]>([])
   const [savedTimetableNavigation, setSavedTimetableNavigation] = useState<SavedTimetableNavigationEntry[]>([])
@@ -1599,6 +1602,7 @@ function App() {
     setOpeningVersion(false)
     const generationSelectionKey = selectedConfigurationKey
     setGenerationId(null)
+    setGenerationJobId(null)
     setGenerationResult(null)
     setOpenedSavedSetup(null)
     setOpenedSavedVersionId(null)
@@ -1623,12 +1627,22 @@ function App() {
     }
 
     let result: GenericTimetableGenerationResult
+    let generationJobId: string | undefined
     try {
       const generated = await generateGenericTimetableOnServer({
         configuration: genericScheduleConversion.config,
         reservedSections: genericReservedSections,
       })
-      if (academicConfigurationKey(selectionRef.current) !== generationSelectionKey) return
+      generationJobId = generated.jobId
+      setGenerationJobId(generated.jobId ?? null)
+      if (academicConfigurationKey(selectionRef.current) !== generationSelectionKey) {
+        console.info(JSON.stringify({
+          event: 'FRONTEND_RESULT_DISCARDED',
+          jobId: generationJobId,
+          reason: 'configuration_changed',
+        }))
+        return
+      }
       result = generated.result
       const generatedPlacementException = generated.placementException
       if (result.ok && generatedPlacementException?.allocationMode === 'random') {
@@ -1656,7 +1670,14 @@ function App() {
         }))
       }
     } catch (error) {
-      if (academicConfigurationKey(selectionRef.current) !== generationSelectionKey) return
+      if (academicConfigurationKey(selectionRef.current) !== generationSelectionKey) {
+        console.info(JSON.stringify({
+          event: 'FRONTEND_RESULT_DISCARDED',
+          jobId: generationJobId,
+          reason: 'configuration_changed',
+        }))
+        return
+      }
       const errorCode = error && typeof error === 'object' && 'code' in error
         && typeof error.code === 'string' ? error.code : 'SCHEDULER_UNAVAILABLE'
       const schedulerErrorCode = errorCode === 'SCHEDULER_CAPACITY'
@@ -1673,7 +1694,17 @@ function App() {
         blockingConstraints: [error instanceof Error ? error.message : 'The timetable generation service is unavailable.'],
       }
     }
-    if (academicConfigurationKey(selectionRef.current) !== generationSelectionKey) return
+    if (academicConfigurationKey(selectionRef.current) !== generationSelectionKey) {
+      console.info(JSON.stringify({
+        event: 'FRONTEND_RESULT_DISCARDED',
+        jobId: generationJobId,
+        reason: 'configuration_changed',
+      }))
+      return
+    }
+    const resultAccepted = result.ok
+      ? isCompleteGeneratedResult(result, genericScheduleConversion.config.sections.map((section) => section.id))
+      : false
     if (result.ok) {
       if (isGenericConfiguration) {
         setGeneratedTargetSchedules((current) => ({
@@ -1684,10 +1715,37 @@ function App() {
       setGenerationId(crypto.randomUUID())
     }
     setGenerationResult(result)
+    console.info(JSON.stringify({
+      event: 'FRONTEND_RESULT_VALIDATED',
+      jobId: generationJobId,
+      resultOk: result.ok,
+      sectionCount: result.ok ? result.sections.length : 0,
+      expectedSectionCount: genericScheduleConversion.config.sections.length,
+      valid48Of48: resultAccepted,
+    }))
   }
   const outputSetup = openedSavedSetup ?? setup
   const outputSectionIds = outputSetup.sections.map((section) => section.id)
   const completeGeneration = generationResult?.ok && isCompleteGeneratedResult(generationResult, outputSectionIds) ? generationResult : null
+  const acceptedGenerationJobRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!completeGeneration || !generationJobId || acceptedGenerationJobRef.current === generationJobId) return
+    acceptedGenerationJobRef.current = generationJobId
+    console.info(JSON.stringify({
+      event: 'FRONTEND_RESULT_ACCEPTED',
+      jobId: generationJobId,
+      sectionCount: completeGeneration.sections.length,
+      periodsPerSection: 48,
+      rendered: true,
+    }))
+    void acknowledgeGeneratedTimetable(generationJobId).catch((error: unknown) => {
+      console.warn(JSON.stringify({
+        event: 'FRONTEND_ACCEPTANCE_ACK_FAILED',
+        jobId: generationJobId,
+        message: error instanceof Error ? error.message : 'The generation acceptance could not be recorded.',
+      }))
+    })
+  }, [completeGeneration, generationJobId])
   const incompleteGenerationMessage = generationResult?.ok && !completeGeneration
     ? 'The scheduler response did not include exactly 48 assigned teaching cells for each selected section. No partial timetable is displayed.'
     : null
@@ -1745,6 +1803,7 @@ function App() {
       setSelectedSavedVersionId(saved.versionId)
       setOpenedSavedSetup(setupToShow)
       setGenerationResult({ ok: true, sections: [sectionToOpen], searchNodes: 0, validation: saved.validation })
+      setGenerationJobId(null)
       setGenerationId(saved.generationId)
       setSavedGenerationId(saved.generationId)
       setOpenedSavedVersionId(saved.versionId)
@@ -2053,6 +2112,7 @@ function App() {
             <GeneratedTimetablePreview setup={outputSetup} result={completeGeneration} preferredSectionId={openedSavedSectionId} isLocked={openedVersionLocked} validateSavedOccupancy={validateEditedScheduleOccupancy} onSave={(updatedResult) => {
               setGenerationResult(updatedResult)
               setGenerationId(crypto.randomUUID())
+              setGenerationJobId(null)
               setOpenedSavedVersionId(null)
               setGeneratedTargetSchedules((current) => ({ ...current, [selectedConfigurationKey]: updatedResult.sections as GenericGeneratedSection[] }))
               setVersionError(null)
@@ -2062,6 +2122,8 @@ function App() {
         : generationResult
           ? <div className="generation-error" role="alert"><strong>{generationResult.ok ? 'Timetable generation failed.' : generationResult.code === 'SCHEDULER_CAPACITY'
             ? 'The generation queue is full. Please try again shortly.'
+              : generationResult.code === 'SEARCH_LIMIT'
+                ? 'The scheduler reached its bounded search limit before finding a complete timetable.'
               : generationResult.code === 'SCHEDULER_TIMEOUT'
                 ? 'Generation exceeded the allowed server calculation time.'
                 : generationResult.code === 'SCHEDULER_QUEUE_TIMEOUT'

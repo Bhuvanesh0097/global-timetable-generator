@@ -76,9 +76,25 @@ function generate(input) {
 }
 
 parentPort.on('message', ({ jobId, input }) => {
+  const startedAt = Date.now()
+  const generationStartedAt = Number.isFinite(input?.generationStartedAt) ? input.generationStartedAt : startedAt
+  const logEvent = (event, resultOk) => {
+    console.info(JSON.stringify({
+      event,
+      jobId: input?.generationJobId,
+      requestFingerprint: input?.requestFingerprint,
+      elapsedMs: Date.now() - generationStartedAt,
+      workerElapsedMs: Date.now() - startedAt,
+      ...(typeof resultOk === 'boolean' ? { resultOk } : {}),
+    }))
+  }
+  logEvent('WORKER_STARTED')
   try {
-    parentPort.postMessage({ jobId, value: generate(input) })
+    const value = generate(input)
+    logEvent('WORKER_COMPLETED', value?.result?.ok === true)
+    parentPort.postMessage({ jobId, value })
   } catch (error) {
+    logEvent('WORKER_COMPLETED', false)
     parentPort.postMessage({
       jobId,
       error: error instanceof Error ? error.message : 'The timetable scheduler worker failed.',

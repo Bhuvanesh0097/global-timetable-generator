@@ -76,10 +76,11 @@ interface NormalizedProfile {
 }
 
 const periods = Array.from({ length: genericPeriodsPerDay }, (_, index) => index + 1)
-const defaultSearchNodeLimit = 300_000
+const defaultSearchNodeLimit = 1_000_000
 const maximumSearchNodeLimit = 1_000_000
 const maximumCandidateCount = 20
 const searchRecoveryCandidateCount = 3
+const searchRecoveryFullCandidateCount = 6
 
 function shuffled<T>(values: T[], random: () => number): T[] {
   const result = [...values]
@@ -933,6 +934,8 @@ function buildSchedule(
   }
   const legalSingleCandidates = (): Map<WorkItem, BlockCandidate[]> | undefined => {
     const result = new Map<WorkItem, BlockCandidate[]>()
+    const requiredByTeacher = new Map<string, number>()
+    const availableSlotsByTeacher = new Map<string, Set<number>>()
     for (const section of normalizedSections) {
       for (const item of itemsBySection.get(section.key) ?? []) {
         if (item.schedulesAsBlocks || item.blockDuration !== 1 || item.remaining <= 0) continue
@@ -944,6 +947,20 @@ function buildSchedule(
           return undefined
         }
         result.set(item, candidates)
+        requiredByTeacher.set(item.teacherId, (requiredByTeacher.get(item.teacherId) ?? 0) + item.remaining)
+        const availableSlots = availableSlotsByTeacher.get(item.teacherId) ?? new Set<number>()
+        for (const candidate of candidates) {
+          availableSlots.add(slotIndex(candidate.dayIndex, candidate.startPeriod))
+        }
+        availableSlotsByTeacher.set(item.teacherId, availableSlots)
+      }
+    }
+    for (const [teacherId, requiredPeriods] of requiredByTeacher) {
+      const availablePeriods = availableSlotsByTeacher.get(teacherId)?.size ?? 0
+      if (availablePeriods < requiredPeriods) {
+        const reason = `Teacher ${teacherId}: only ${availablePeriods} globally available period(s) remain for ${requiredPeriods} required period(s).`
+        searchDeadEnds.set(reason, (searchDeadEnds.get(reason) ?? 0) + 1)
+        return undefined
       }
     }
     return result
@@ -1617,7 +1634,8 @@ export function generateGenericTimetable(input: GenericSchedulerInput): GenericT
   const considerCandidate = (candidate: number, searchLimit: number): void => {
     // Give each bounded retry an independent deterministic stream so a difficult
     // first candidate does not leave later retries deep in the same random walk.
-    const random = seededRandom(randomSeedBase + candidate)
+    const candidateSeed = (randomSeedBase >>> 0) + Math.imul(candidate, 0x9e3779b9)
+    const random = seededRandom(candidateSeed)
     const generated = buildSchedule(
       normalizedProfiles, itemsBySection, testTasks, reservedSections,
       unavailableTeacherSlots, alternateWeekUnavailableTeacherSlots, random, searchLimit,
@@ -1644,7 +1662,9 @@ export function generateGenericTimetable(input: GenericSchedulerInput): GenericT
       considerCandidate(candidateCount + recovery, quickSearchLimit)
       if (best) break
     }
-    if (!best) considerCandidate(candidateCount + searchRecoveryCandidateCount, configuredSearchLimit)
+    for (let recovery = 0; recovery < searchRecoveryFullCandidateCount && !best; recovery += 1) {
+      considerCandidate(candidateCount + searchRecoveryCandidateCount + recovery, configuredSearchLimit)
+    }
   }
   return best ?? lastFailure ?? failure(['No valid randomized schedule candidate was found.'], 'UNSATISFIABLE')
 }

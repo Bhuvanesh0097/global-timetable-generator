@@ -10,6 +10,10 @@ const setupArrayFields = [
   'labAssignments', 'specialActivities', 'sectionSubjectAssignments', 'specialActivityAssignments',
 ]
 
+function logGenerationEvent(event, details) {
+  console.info(JSON.stringify({ event, ...details }))
+}
+
 function sendJson(response, statusCode, value) {
   response.statusCode = statusCode
   response.setHeader('Content-Type', 'application/json; charset=utf-8')
@@ -127,9 +131,14 @@ export function createTimetableApiMiddleware(repository, {
   const activeGenerationFingerprints = new Map()
 
   const pruneGenerationJobs = () => {
-    const expiredBefore = Date.now() - generationJobRetentionMs
+    const now = Date.now()
+    const expiredBefore = now - generationJobRetentionMs
+    const unobservedExpiredBefore = now - Math.max(generationJobRetentionMs, defaultGenerationJobRetentionMs)
     for (const [jobId, job] of generationJobs) {
-      if (job.status !== 'queued' && job.status !== 'running' && job.finishedAt < expiredBefore) {
+      const retentionExpired = job.firstPolledAt === undefined
+        ? job.finishedAt < unobservedExpiredBefore
+        : job.firstPolledAt < expiredBefore
+      if (job.status !== 'queued' && job.status !== 'running' && retentionExpired) {
         generationJobs.delete(jobId)
         if (activeGenerationFingerprints.get(job.fingerprint) === jobId) {
           activeGenerationFingerprints.delete(job.fingerprint)
@@ -140,6 +149,13 @@ export function createTimetableApiMiddleware(repository, {
 
   const runGenerationJob = async (job, { configuration, reservedSections, identity, occupancyStaff }) => {
     job.status = 'running'
+    job.startedAt = Date.now()
+    logGenerationEvent('GENERATION_JOB_STARTED', {
+      jobId: job.id,
+      requestFingerprint: job.fingerprint,
+      elapsedMs: job.startedAt - job.createdAt,
+      status: job.status,
+    })
     try {
       const maximumAttempts = 8
       let lastOccupancyConflicts = []
@@ -154,6 +170,15 @@ export function createTimetableApiMiddleware(repository, {
           reservedSections,
           unavailableTeacherSlots: occupancy.unavailableSlots,
           alternateWeekUnavailableTeacherSlots: occupancy.alternateWeekUnavailableSlots,
+          generationJobId: job.id,
+          requestFingerprint: job.fingerprint,
+          generationStartedAt: job.startedAt,
+        })
+        logGenerationEvent('SCHEDULER_RESULT_RECEIVED', {
+          jobId: job.id,
+          requestFingerprint: job.fingerprint,
+          elapsedMs: Date.now() - job.startedAt,
+          resultOk: generated?.result?.ok === true,
         })
         if (!generated?.result || typeof generated.result.ok !== 'boolean') {
           throw new Error('The timetable scheduler returned an invalid response.')
@@ -162,6 +187,13 @@ export function createTimetableApiMiddleware(repository, {
           job.value = { result: generated.result }
           job.status = 'completed'
           job.finishedAt = Date.now()
+          logGenerationEvent('GENERATION_JOB_COMPLETED', {
+            jobId: job.id,
+            requestFingerprint: job.fingerprint,
+            elapsedMs: job.finishedAt - job.startedAt,
+            resultOk: false,
+            status: job.status,
+          })
           return
         }
 
@@ -177,6 +209,14 @@ export function createTimetableApiMiddleware(repository, {
           }
           job.status = 'completed'
           job.finishedAt = Date.now()
+          logGenerationEvent('GENERATION_JOB_COMPLETED', {
+            jobId: job.id,
+            requestFingerprint: job.fingerprint,
+            elapsedMs: job.finishedAt - job.startedAt,
+            resultOk: true,
+            sectionCount: generated.result.sections.length,
+            status: job.status,
+          })
           return
         }
       }
@@ -190,12 +230,26 @@ export function createTimetableApiMiddleware(repository, {
         },
       }
       job.status = 'completed'
+      logGenerationEvent('GENERATION_JOB_COMPLETED', {
+        jobId: job.id,
+        requestFingerprint: job.fingerprint,
+        elapsedMs: Date.now() - job.startedAt,
+        resultOk: false,
+        status: job.status,
+      })
     } catch (error) {
       job.error = {
         message: error instanceof Error ? error.message : 'The timetable generation service failed.',
         ...(typeof error?.code === 'string' ? { code: error.code } : {}),
       }
       job.status = 'failed'
+      logGenerationEvent('GENERATION_JOB_FAILED', {
+        jobId: job.id,
+        requestFingerprint: job.fingerprint,
+        elapsedMs: Date.now() - job.startedAt,
+        status: job.status,
+        code: job.error.code ?? 'UNKNOWN',
+      })
     } finally {
       job.finishedAt = Date.now()
       if (activeGenerationFingerprints.get(job.fingerprint) === job.id) {
@@ -209,6 +263,7 @@ export function createTimetableApiMiddleware(repository, {
     const pathname = url.pathname.replace(/^\/api(?=\/|$)/, '')
     try {
       if (request.method === 'POST' && pathname === '/timetable/generate') {
+        const requestReceivedAt = Date.now()
         const body = await readJsonBody(request, 'generation request')
         const { configuration, reservedSections = [] } = body ?? {}
         if (!configuration || typeof configuration !== 'object' || Array.isArray(configuration)
@@ -219,6 +274,10 @@ export function createTimetableApiMiddleware(repository, {
         const identity = generationIdentity(configuration)
         const occupancyStaff = generationStaff(configuration)
         const fingerprint = generationFingerprint({ configuration, reservedSections })
+        logGenerationEvent('GENERATION_REQUEST_RECEIVED', {
+          requestFingerprint: fingerprint,
+          elapsedMs: Date.now() - requestReceivedAt,
+        })
         pruneGenerationJobs()
         const existingJobId = activeGenerationFingerprints.get(fingerprint)
         const existingJob = existingJobId ? generationJobs.get(existingJobId) : undefined
@@ -235,9 +294,15 @@ export function createTimetableApiMiddleware(repository, {
           return
         }
         const jobId = randomUUID()
-        const job = { id: jobId, fingerprint, status: 'queued' }
+        const job = { id: jobId, fingerprint, status: 'queued', createdAt: Date.now() }
         generationJobs.set(jobId, job)
         activeGenerationFingerprints.set(fingerprint, jobId)
+        logGenerationEvent('GENERATION_JOB_CREATED', {
+          jobId,
+          requestFingerprint: fingerprint,
+          elapsedMs: job.createdAt - requestReceivedAt,
+          status: job.status,
+        })
         sendJson(response, 202, { jobId })
         setImmediate(() => {
           void runGenerationJob(job, {
@@ -250,6 +315,33 @@ export function createTimetableApiMiddleware(repository, {
         return
       }
 
+      const acceptedGenerationJobMatch = pathname.match(/^\/timetable\/generation-jobs\/([0-9a-f-]{36})\/accepted$/i)
+      if (request.method === 'POST' && acceptedGenerationJobMatch) {
+        pruneGenerationJobs()
+        const job = generationJobs.get(acceptedGenerationJobMatch[1])
+        if (!job) {
+          sendJson(response, 404, { error: 'That timetable generation request was not found.' })
+          return
+        }
+        if (job.status !== 'completed' || job.value?.result?.ok !== true) {
+          sendJson(response, 409, { error: 'Only a completed, valid timetable generation can be acknowledged.' })
+          return
+        }
+        if (!job.frontendResultAcceptedAt) {
+          job.frontendResultAcceptedAt = Date.now()
+          logGenerationEvent('FRONTEND_RESULT_ACCEPTED', {
+            jobId: job.id,
+            requestFingerprint: job.fingerprint,
+            elapsedMs: job.frontendResultAcceptedAt - job.createdAt,
+            resultOk: true,
+            sectionCount: job.value.result.sections.length,
+            status: job.status,
+          })
+        }
+        sendJson(response, 200, { accepted: true })
+        return
+      }
+
       const generationJobMatch = pathname.match(/^\/timetable\/generation-jobs\/([0-9a-f-]{36})$/i)
       if (request.method === 'GET' && generationJobMatch) {
         pruneGenerationJobs()
@@ -258,11 +350,20 @@ export function createTimetableApiMiddleware(repository, {
           sendJson(response, 404, { error: 'That timetable generation request was not found.' })
           return
         }
+        if (job.status === 'completed' && job.firstPolledAt === undefined) job.firstPolledAt = Date.now()
         sendJson(response, 200, {
           status: job.status,
           ...(job.value ? { value: job.value } : {}),
           ...(job.error ? { error: job.error.message, code: job.error.code } : {}),
         })
+        if (job.status === 'completed') {
+          logGenerationEvent('FRONTEND_POLL_COMPLETED', {
+            jobId: job.id,
+            requestFingerprint: job.fingerprint,
+            elapsedMs: Date.now() - (job.createdAt ?? job.finishedAt),
+            resultOk: job.value?.result?.ok === true,
+          })
+        }
         return
       }
 

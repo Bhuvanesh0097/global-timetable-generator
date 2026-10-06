@@ -134,7 +134,7 @@ export interface GenericSchedulingRules {
   /** A lab definition represents one shared physical resource across sections when true. */
   preventConcurrentUseOfSameLab?: boolean
   p1Tests?: GenericP1TestConfig
-  /** Search guard, not a curriculum rule. Defaults to 300,000 explored states. */
+  /** Search guard, not a curriculum rule. Defaults to 1,000,000 explored states. */
   searchNodeLimit?: number
 }
 

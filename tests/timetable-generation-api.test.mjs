@@ -24,8 +24,8 @@ const configuration = {
   placementException: { enabled: false, allocationMode: 'custom', alternateSubjects: [] },
 }
 
-async function withApi(repository, runGeneration, callback) {
-  const middleware = createTimetableApiMiddleware(repository, { runGeneration })
+async function withApi(repository, runGeneration, callback, options = {}) {
+  const middleware = createTimetableApiMiddleware(repository, { ...options, runGeneration })
   const server = createServer((request, response) => {
     void middleware(request, response, () => {
       response.statusCode = 404
@@ -251,6 +251,28 @@ test('does not reuse completed results and prunes completed jobs after the confi
   } finally {
     await new Promise((resolve) => server.close(resolve))
   }
+})
+
+test('keeps an unobserved completed job until its first poll', async () => {
+  const repository = {
+    async getTeacherUnavailableOccupancy() {
+      return { unavailableSlots: [], alternateWeekUnavailableSlots: [] }
+    },
+    async getTeacherGenerationOccupancyConflicts() {
+      return []
+    },
+  }
+  const result = {
+    result: { ok: false, code: 'UNSATISFIABLE', message: 'No valid timetable.', blockingConstraints: [] },
+  }
+
+  await withApi(repository, async () => result, async (origin) => {
+    const { jobId } = await postGeneration(origin, { configuration, reservedSections: [] })
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    const response = await fetch(`${origin}/api/timetable/generation-jobs/${jobId}`)
+    assert.equal(response.status, 200)
+    assert.equal((await response.json()).status, 'completed')
+  }, { generationJobRetentionMs: 20 })
 })
 
 test('generation worker failures are returned as structured job errors', async () => {
