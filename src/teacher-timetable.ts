@@ -90,17 +90,6 @@ export function getTeachersUsedInTimetable(
   ]
 }
 
-export function filterTeacherTimetableTeachers(
-  teachers: TeacherTimetableTeacher[],
-  query: string,
-): TeacherTimetableTeacher[] {
-  const normalizedQuery = query.trim().toLocaleLowerCase()
-  if (!normalizedQuery) return teachers
-  return teachers.filter(({ id, name }) =>
-    name.toLocaleLowerCase().includes(normalizedQuery)
-    || id.toLocaleLowerCase().includes(normalizedQuery))
-}
-
 /** Safety check for a staff member assigned to multiple generated sections at once. */
 export function findTeacherTimetableClashes(generatedSections: GeneratedSection[]): TeacherTimetableClash[] {
   const assignments = new Map<string, TeacherTimetableClash>()

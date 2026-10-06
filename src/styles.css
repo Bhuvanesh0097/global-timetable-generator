@@ -349,7 +349,7 @@
 .teacher-feature[open]>summary{border-bottom:1px solid var(--line);background:#f7f9fc}
 .teacher-feature-content{padding:16px}
 .teacher-select-field{display:grid;gap:6px;width:min(100%,360px);color:#425873;font-size:11px;font-weight:600}
-.teacher-select-field select,.teacher-select-field input{min-height:36px;padding:7px 9px;border:1px solid #ccd6e2;border-radius:5px;background:#fff;color:#24354b;font-size:12px}
+.teacher-select-field select{min-height:36px;padding:7px 9px;border:1px solid #ccd6e2;border-radius:5px;background:#fff;color:#24354b;font-size:12px}
 .team-teacher-selects{display:grid;gap:5px}
 .teacher-export-actions{display:flex;justify-content:flex-end;gap:8px;margin:12px 0}
 .teacher-export-actions button{padding:7px 11px;border:1px solid #9aa5b1;border-radius:3px;background:#fff;color:#24354b;font:600 11px Arial,sans-serif;cursor:pointer}

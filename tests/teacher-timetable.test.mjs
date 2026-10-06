@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { buildTeacherTimetable, filterTeacherTimetableTeachers, findTeacherTimetableClashes, getTeachersUsedInTimetable, teacherTimetableColumns } from '../src/teacher-timetable.ts'
+import { buildTeacherTimetable, findTeacherTimetableClashes, getTeachersUsedInTimetable, teacherTimetableColumns } from '../src/teacher-timetable.ts'
 import { globalStaffIds } from '../src/staff-identities.ts'
 
 const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
@@ -68,17 +68,6 @@ test('teacher options include only occupied identities from the current timetabl
     { id: 'alternate-teacher', name: 'Canonical Alternate Name' },
     { id: 'staff-same-name-different-id', name: 'Current Teacher' },
   ])
-})
-
-test('teacher search matches only relevant teachers by name or stable ID', () => {
-  const relevantTeachers = [
-    { id: 'ST003', name: 'Mrs. R. Indumathi' },
-    { id: 'ST004', name: 'Other Teacher' },
-  ]
-
-  assert.deepEqual(filterTeacherTimetableTeachers(relevantTeachers, 'ind'), [relevantTeachers[0]])
-  assert.deepEqual(filterTeacherTimetableTeachers(relevantTeachers, 'st003'), [relevantTeachers[0]])
-  assert.deepEqual(filterTeacherTimetableTeachers(relevantTeachers, 'unrelated global staff'), [])
 })
 
 test('teacher options follow the active timetable when the academic context changes', () => {
