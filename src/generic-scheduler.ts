@@ -815,11 +815,15 @@ function buildSchedule(
         ? item.rules.coreConsecutiveMaximum ?? item.rules.subjectConsecutiveMaximum ?? 2
         : item.rules.subjectConsecutiveMaximum ?? 2
       const consecutiveLimit = Math.max(Math.min(configuredLimit, 2), item.blockDuration)
-      const proposed = [...getDayCells(item, dayIndex)]
-      for (let period = startPeriod; period <= endPeriod; period += 1) proposed[period - 1] = { itemId: item.id } as GenericCell
+      const cells = sectionState.cells
+      const dayStart = dayIndex * genericPeriodsPerDay
+      const proposedStart = dayStart + startPeriod - 1
+      const proposedEnd = dayStart + endPeriod - 1
       let run = 0
-      for (const cell of proposed) {
-        run = cell?.itemId === item.id ? run + 1 : 0
+      for (let index = dayStart; index < dayStart + genericPeriodsPerDay; index += 1) {
+        const isItem = index >= proposedStart && index <= proposedEnd
+          || cells[index]?.itemId === item.id
+        run = isItem ? run + 1 : 0
         if (run > consecutiveLimit) return false
       }
       if (!regularSubjectAlternateRulesAllow(item, candidate, duration)) return false
