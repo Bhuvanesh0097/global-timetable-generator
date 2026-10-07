@@ -1324,14 +1324,10 @@ test('five configured sections generate together with exact hours and distinct c
   }
 })
 
-test('an explicit low search-node limit returns a bounded failure without partial cells', () => {
+test('an explicit low fast-search node limit escalates to a complete deterministic timetable', () => {
   const result = generateGenericTimetable(oneSectionConfig(48, { rules: { searchNodeLimit: 1 } }))
-  assert.equal(result.ok, false)
-  if (!result.ok) {
-    assert.equal(result.code, 'SEARCH_LIMIT')
-    assert.ok(result.blockingConstraints.some((issue) => issue.includes('1-node limit')))
-    assert.equal('sections' in result, false, 'failed searches must not return partial timetables')
-  }
+  assertEverySectionIsComplete(result, 1)
+  if (result.ok) assert.ok(result.searchNodes > 1, 'the successful result should come from the deterministic escalation stage')
   assert.ok(validateGenericScheduleConfig({ ...oneSectionConfig(48), candidateCount: 21 })
     .some((issue) => issue.includes('Candidate count cannot exceed 20')))
   assert.ok(validateGenericScheduleConfig(oneSectionConfig(48, { rules: { searchNodeLimit: 1_000_001 } }))

@@ -27,7 +27,7 @@ test('worker executes the existing TypeScript scheduler and returns its structur
   }
 })
 
-test('worker generates a complete timetable through the existing scheduler', async () => {
+test('worker escalates a bounded fast-search result to generate a complete timetable', async () => {
   const pool = createGenericSchedulerWorkerPool({ workerCount: 1 })
   try {
     const response = await pool.run({
@@ -44,6 +44,7 @@ test('worker generates a complete timetable through the existing scheduler', asy
           weeklyHours: 12,
           teacherAssignments: [{ sectionId: 'A', teacherId: `ST00${index + 1}` }],
         })),
+        rules: { searchNodeLimit: 1 },
       },
       reservedSections: [],
       unavailableTeacherSlots: [],

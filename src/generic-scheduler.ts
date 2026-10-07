@@ -578,6 +578,7 @@ function buildSchedule(
   alternateWeekUnavailableTeacherSlots: GenericUnavailableTeacherSlot[] = [],
   random: () => number = Math.random,
   requestedSearchLimit?: number,
+  deterministicSearch = false,
 ): GenericTimetableGenerationResult {
   const normalizedSections = profiles.flatMap((profile) => profile.sections)
   for (const items of itemsBySection.values()) {
@@ -652,7 +653,10 @@ function buildSchedule(
   const failedSinglePeriodStates = new Set<string>()
   const failedSinglePeriodStateKey = createFailedSinglePeriodStateKeyBuilder()
   const configuredSearchLimit = Math.min(...profiles.map(({ profile }) => profile.rules?.searchNodeLimit ?? defaultSearchNodeLimit))
-  const searchLimit = Math.min(configuredSearchLimit, requestedSearchLimit ?? configuredSearchLimit)
+  const searchLimit = deterministicSearch
+    ? Math.min(maximumSearchNodeLimit, requestedSearchLimit ?? maximumSearchNodeLimit)
+    : Math.min(configuredSearchLimit, requestedSearchLimit ?? configuredSearchLimit)
+  const ordered = <T>(values: T[]): T[] => deterministicSearch ? [...values] : shuffled(values, random)
 
   const getDayCells = (item: WorkItem, dayIndex: number) => states.get(item.sectionId)!.cells.slice(dayIndex * 8, dayIndex * 8 + 8)
   const countItemOnDay = (item: WorkItem, dayIndex: number) => {
@@ -1078,7 +1082,7 @@ function buildSchedule(
     for (const [item, candidates] of candidatesByItem) {
       pressureByItem.set(item, candidates.reduce((total, candidate) => total + peerCount(item, candidate), 0))
     }
-    const [item] = shuffled([...candidatesByItem.keys()], random).sort((left, right) =>
+    const [item] = ordered([...candidatesByItem.keys()]).sort((left, right) =>
       (candidatesByItem.get(left)!.length - left.remaining) - (candidatesByItem.get(right)!.length - right.remaining)
       || pressureByItem.get(right)! - pressureByItem.get(left)!
       || candidatesByItem.get(left)!.length - candidatesByItem.get(right)!.length
@@ -1087,7 +1091,7 @@ function buildSchedule(
       if (!exceededLimit) failedSinglePeriodStates.add(stateKey)
       return false
     }
-    const candidates = shuffled(candidatesByItem.get(item)!, random).sort((left, right) =>
+    const candidates = ordered(candidatesByItem.get(item)!).sort((left, right) =>
       peerCount(item, left) - peerCount(item, right)
       || countItemOnDay(item, left.dayIndex) - countItemOnDay(item, right.dayIndex)
       || (item.isCore
@@ -1143,7 +1147,7 @@ function buildSchedule(
       }
     }
     if (!selected) return false
-    for (const candidate of shuffled(candidates, random)) {
+    for (const candidate of ordered(candidates)) {
       put(selected, candidate)
       assigned.add(selected.id)
       assignedCandidates.set(selected.id, candidate)
@@ -1698,18 +1702,23 @@ export function generateGenericTimetable(input: GenericSchedulerInput): GenericT
   let best: GenericTimetableGenerationResult | undefined
   let bestScore = Number.POSITIVE_INFINITY
   let lastFailure: GenericTimetableGenerationResult | undefined
+  let sawSearchLimit = false
   const configuredSearchLimit = Math.min(...normalizedProfiles.map(({ profile }) => profile.rules?.searchNodeLimit ?? defaultSearchNodeLimit))
   const quickSearchLimit = Math.max(1, Math.floor(configuredSearchLimit / 30))
-  const considerCandidate = (candidate: number, searchLimit: number): void => {
+  const considerCandidate = (candidate: number, searchLimit: number, deterministicSearch = false): void => {
     // Give each bounded retry an independent deterministic stream so a difficult
     // first candidate does not leave later retries deep in the same random walk.
     const candidateSeed = (randomSeedBase >>> 0) + Math.imul(candidate, 0x9e3779b9)
     const random = seededRandom(candidateSeed)
     const generated = buildSchedule(
       normalizedProfiles, itemsBySection, testTasks, reservedSections,
-      unavailableTeacherSlots, alternateWeekUnavailableTeacherSlots, random, searchLimit,
+      unavailableTeacherSlots, alternateWeekUnavailableTeacherSlots, random, searchLimit, deterministicSearch,
     )
-    if (!generated.ok) { lastFailure = generated; return }
+    if (!generated.ok) {
+      lastFailure = generated
+      if (generated.code === 'SEARCH_LIMIT') sawSearchLimit = true
+      return
+    }
     const statesForScore = new Map<string, SectionState>()
     generated.sections.forEach((section, index) => {
       const normalizedSection = allSections[index]
@@ -1726,13 +1735,23 @@ export function generateGenericTimetable(input: GenericSchedulerInput): GenericT
   for (let candidate = 0; candidate < candidateCount; candidate += 1) {
     considerCandidate(candidate, quickSearchLimit)
   }
-  if (!best && lastFailure && !lastFailure.ok && lastFailure.code === 'SEARCH_LIMIT') {
+  if (!best && sawSearchLimit) {
     for (let recovery = 0; recovery < searchRecoveryCandidateCount; recovery += 1) {
       considerCandidate(candidateCount + recovery, quickSearchLimit)
       if (best) break
     }
     for (let recovery = 0; recovery < searchRecoveryFullCandidateCount && !best; recovery += 1) {
       considerCandidate(candidateCount + searchRecoveryCandidateCount + recovery, configuredSearchLimit)
+    }
+    if (!best) {
+      // Use canonical candidate tie ordering after bounded randomized attempts.
+      // Keep the escalation within the existing global node maximum; an
+      // incomplete escalation remains SEARCH_LIMIT rather than UNSATISFIABLE.
+      considerCandidate(
+        candidateCount + searchRecoveryCandidateCount + searchRecoveryFullCandidateCount,
+        maximumSearchNodeLimit,
+        true,
+      )
     }
   }
   return best ?? lastFailure ?? failure(['No valid randomized schedule candidate was found.'], 'UNSATISFIABLE')
