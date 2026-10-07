@@ -582,7 +582,7 @@ function buildSchedule(
     }
     return saved ? 'a saved timetable' : undefined
   }
-  const labResourceAtSlot = new Map<string, string>()
+  const labResourceAtSlot = Array.from({ length: genericStudentSlotsPerWeek }, () => new Map<string, string>())
   const labBlocksPerDay = new Map<string, number>()
   const labBlocksPerDefinitionDay = new Map<string, number>()
   const placementPeriodsPerDay = new Map<string, number>()
@@ -800,7 +800,7 @@ function buildSchedule(
         return false
       }
       if (item.isLab && item.rules.preventConcurrentUseOfSameLab !== false) {
-        const previousSection = labResourceAtSlot.get(`${index}:${item.labResourceId}`)
+        const previousSection = labResourceAtSlot[index].get(item.labResourceId)
         if (previousSection && previousSection !== item.sectionId) return false
       }
     }
@@ -858,7 +858,7 @@ function buildSchedule(
       const alternateTeachers = alternateTeacherAtSlot.get(index) ?? new Set<string>()
       alternateTeachers.add(alternateTeacherId)
       alternateTeacherAtSlot.set(index, alternateTeachers)
-      if (item.isLab && item.rules.preventConcurrentUseOfSameLab !== false) labResourceAtSlot.set(`${index}:${item.labResourceId}`, item.sectionId)
+      if (item.isLab && item.rules.preventConcurrentUseOfSameLab !== false) labResourceAtSlot[index].set(item.labResourceId, item.sectionId)
     }
     item.remaining -= duration
     if (item.isLab) {
@@ -888,7 +888,7 @@ function buildSchedule(
       const alternateTeachers = alternateTeacherAtSlot.get(index)
       alternateTeachers?.delete(alternateTeacherId)
       if (alternateTeachers?.size === 0) alternateTeacherAtSlot.delete(index)
-      if (item.isLab && item.rules.preventConcurrentUseOfSameLab !== false) labResourceAtSlot.delete(`${index}:${item.labResourceId}`)
+      if (item.isLab && item.rules.preventConcurrentUseOfSameLab !== false) labResourceAtSlot[index].delete(item.labResourceId)
     }
     item.remaining += duration
     if (item.isLab) {
