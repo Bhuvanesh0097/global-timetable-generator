@@ -59,6 +59,48 @@ interface SectionState {
   cells: Array<GenericCell | null>
 }
 
+function createFailedSinglePeriodStateKeyBuilder(): (
+  states: Map<string, SectionState>,
+  itemsBySection: Map<string, WorkItem[]>,
+) => string {
+  const stringTokens = new Map<string, number>()
+  const cellSignatureTokens = new Map<string, number>()
+  const cellObjectTokens = new WeakMap<GenericCell, number>()
+  const tokenFor = (value: string): number => {
+    const existing = stringTokens.get(value)
+    if (existing !== undefined) return existing
+    const token = stringTokens.size + 1
+    stringTokens.set(value, token)
+    return token
+  }
+  const tokenForCell = (cell: GenericCell): number => {
+    const objectToken = cellObjectTokens.get(cell)
+    if (objectToken !== undefined) return objectToken
+    const signature = JSON.stringify(cell)
+    let token = cellSignatureTokens.get(signature)
+    if (token === undefined) {
+      token = cellSignatureTokens.size + 1
+      cellSignatureTokens.set(signature, token)
+    }
+    cellObjectTokens.set(cell, token)
+    return token
+  }
+
+  return (states, itemsBySection) => {
+    const values: number[] = [states.size]
+    for (const [sectionId, state] of states) {
+      values.push(tokenFor(sectionId), state.cells.length)
+      for (const cell of state.cells) values.push(cell ? tokenForCell(cell) : 0)
+    }
+    values.push(itemsBySection.size)
+    for (const [sectionId, items] of itemsBySection) {
+      values.push(tokenFor(sectionId), items.length)
+      for (const item of items) values.push(tokenFor(item.id), item.remaining)
+    }
+    return values.join(',')
+  }
+}
+
 interface NormalizedSection {
   key: string
   profileKey: string
@@ -607,6 +649,8 @@ function buildSchedule(
   let searchNodes = 0
   let exceededLimit = false
   const searchDeadEnds = new Map<string, number>()
+  const failedSinglePeriodStates = new Set<string>()
+  const failedSinglePeriodStateKey = createFailedSinglePeriodStateKeyBuilder()
   const configuredSearchLimit = Math.min(...profiles.map(({ profile }) => profile.rules?.searchNodeLimit ?? defaultSearchNodeLimit))
   const searchLimit = Math.min(configuredSearchLimit, requestedSearchLimit ?? configuredSearchLimit)
 
@@ -992,10 +1036,19 @@ function buildSchedule(
 
   const fillSinglePeriods = (): boolean => {
     if (++searchNodes > searchLimit) { exceededLimit = true; return false }
+    const stateKey = failedSinglePeriodStateKey(states, itemsBySection)
+    if (failedSinglePeriodStates.has(stateKey)) return false
     const candidatesByItem = legalSingleCandidates()
-    if (!candidatesByItem) return false
-    if (!candidatesByItem.size) return [...states.values()].every((state) => state.cells.every(Boolean))
-      && areSectionArrangementsUniqueWithReserved(normalizedSections, states, reservedSections)
+    if (!candidatesByItem) {
+      if (!exceededLimit) failedSinglePeriodStates.add(stateKey)
+      return false
+    }
+    if (!candidatesByItem.size) {
+      const complete = [...states.values()].every((state) => state.cells.every(Boolean))
+        && areSectionArrangementsUniqueWithReserved(normalizedSections, states, reservedSections)
+      if (!complete && !exceededLimit) failedSinglePeriodStates.add(stateKey)
+      return complete
+    }
 
     const peersByStudentSlot = new Map<string, Set<WorkItem>>()
     const peersByTeacherSlot = new Map<string, Set<WorkItem>>()
@@ -1030,7 +1083,10 @@ function buildSchedule(
       || pressureByItem.get(right)! - pressureByItem.get(left)!
       || candidatesByItem.get(left)!.length - candidatesByItem.get(right)!.length
       || right.remaining - left.remaining)
-    if (!item) return false
+    if (!item) {
+      if (!exceededLimit) failedSinglePeriodStates.add(stateKey)
+      return false
+    }
     const candidates = shuffled(candidatesByItem.get(item)!, random).sort((left, right) =>
       peerCount(item, left) - peerCount(item, right)
       || countItemOnDay(item, left.dayIndex) - countItemOnDay(item, right.dayIndex)
@@ -1045,6 +1101,7 @@ function buildSchedule(
       remove(task, candidate)
       if (exceededLimit) return false
     }
+    if (!exceededLimit) failedSinglePeriodStates.add(stateKey)
     return false
   }
 
