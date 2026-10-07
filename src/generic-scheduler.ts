@@ -611,7 +611,15 @@ function buildSchedule(
   const searchLimit = Math.min(configuredSearchLimit, requestedSearchLimit ?? configuredSearchLimit)
 
   const getDayCells = (item: WorkItem, dayIndex: number) => states.get(item.sectionId)!.cells.slice(dayIndex * 8, dayIndex * 8 + 8)
-  const countItemOnDay = (item: WorkItem, dayIndex: number) => getDayCells(item, dayIndex).filter((cell) => cell?.itemId === item.id).length
+  const countItemOnDay = (item: WorkItem, dayIndex: number) => {
+    const cells = states.get(item.sectionId)!.cells
+    const dayStart = dayIndex * 8
+    let count = 0
+    for (let index = dayStart; index < dayStart + 8; index += 1) {
+      if (cells[index]?.itemId === item.id) count += 1
+    }
+    return count
+  }
   const sectionDayKey = (item: WorkItem, dayIndex: number) => `${item.sectionId}:${dayIndex}`
   const isNormalActivity = (item: WorkItem) => item.kind === 'activity' && !item.isPlacement
 
