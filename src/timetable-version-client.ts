@@ -4,6 +4,7 @@ import type {
   GenericGeneratedSection, GenericPlacementExceptionConfig, GenericScheduleConfig,
   GenericTimetableGenerationResult, GenericTimetableValidationSummary, GenericUnavailableTeacherSlot,
 } from './generic-scheduling-model.ts'
+import type { WeekDay } from './models'
 
 export interface SavedTimetableVersionSummary {
   versionId: string
@@ -51,6 +52,61 @@ export interface GenericTimetableGenerationResponse {
   elapsedMs?: number
 }
 
+export interface OverallStaffDirectoryTeacher {
+  id: string
+  canonicalName: string
+  normalizedName: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface OverallStaffTimetableAssignment {
+  teacherId: string
+  teacherName: string
+  teacherNameSnapshot: string
+  week: 'normal' | 'alternate'
+  department: string
+  year: string
+  semester: string
+  academicYear: string
+  sectionId: string
+  sectionName: string
+  versionId: string
+  generationId: string
+  versionStatus: 'SAVED' | 'LOCKED'
+  cell: {
+    itemId: string
+    blockId?: string
+    code: string
+    abbreviation: string
+    name: string
+    teacherId: string
+    teacherNameSnapshot: string
+    kind: 'core' | 'other' | 'lab' | 'activity'
+    isCoreTest?: boolean
+    cellType: 'SUBJECT' | 'OTHER_SUBJECT' | 'LAB' | 'PLACEMENT' | 'SPECIAL_ACTIVITY'
+    alternateSubject?: {
+      placementPosition: number
+      subjectId: string
+      subjectKind: 'core' | 'other'
+      code: string
+      abbreviation: string
+      name: string
+      teacherId: string
+      teacherNameSnapshot: string
+    }
+  }
+}
+
+export interface OverallStaffTimetableData {
+  teacher: OverallStaffDirectoryTeacher
+  days: Record<WeekDay, Record<number, {
+    conflict: boolean
+    conflictWeeks: Array<'normal' | 'alternate'>
+    assignments: OverallStaffTimetableAssignment[]
+  }>>
+}
+
 function logGenerationEvent(event: string, details: Record<string, unknown>): void {
   console.info(JSON.stringify({ event, ...details }))
 }
@@ -87,6 +143,15 @@ export function listSavedTimetableVersions(identity: {
 
 export function listSavedTimetableNavigation(): Promise<{ timetables: SavedTimetableNavigationEntry[] }> {
   return apiRequest('/api/saved-timetables')
+}
+
+export function listOverallStaffDirectory(): Promise<{ teachers: OverallStaffDirectoryTeacher[] }> {
+  return apiRequest('/api/overall-staff-timetable')
+}
+
+export function loadOverallStaffTimetable(teacherId: string): Promise<OverallStaffTimetableData> {
+  const query = new URLSearchParams({ teacherId })
+  return apiRequest(`/api/overall-staff-timetable?${query}`)
 }
 
 export function deleteSavedTimetableVersion(versionId: string): Promise<{ deletedVersion: {

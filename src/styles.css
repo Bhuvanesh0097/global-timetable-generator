@@ -384,6 +384,10 @@
 .teacher-grid td small{font-size:9px;line-height:1.15}
 .teacher-free-cell{color:#8b96a5;background:#fafbfc}
 .teacher-busy-cell{background:#fff}
+.overall-staff-selected{margin:10px 0 0;color:#526983;font-size:11px}
+.overall-staff-grid td.overall-staff-conflict-cell{background:#fde4e4;color:#8d3037}
+.overall-staff-grid .overall-staff-assignment{align-items:center;overflow-wrap:anywhere}
+.overall-staff-grid .overall-staff-assignment small{color:#526983;font-size:9px;line-height:1.15}
 @media(max-width:650px){.teacher-feature-content{padding:10px}.teacher-export-actions{flex-wrap:wrap}.teacher-export-actions button{flex:1}}
 @media print{
   @page{size:A4 landscape;margin:0}

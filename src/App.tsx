@@ -10,6 +10,7 @@ import { toGenericScheduleConfig } from './generic-schedule-adapter.ts'
 import { cloneGeneratedSections, exchangeGeneratedTimetableCells, getEditableTimetableChoices, updateGeneratedTimetableCell } from './timetable-edit'
 import { TeacherTimetableFeature } from './TeacherTimetable'
 import { ConsolidatedFacultyTimetable } from './ConsolidatedFacultyTimetable'
+import { OverallStaffTimetableFeature } from './OverallStaffTimetable'
 import { getGenerateTimetableLabel, getSectionCountLabel, getSectionIds, initializeConfiguredSections } from './section-configuration'
 import { globalStaffMaster } from './staff-identities'
 import { TeacherSelector } from './TeacherSelector'
@@ -2135,6 +2136,7 @@ function App() {
             ? null
             : <p className="no-timetable-placeholder">No timetable generated yet.</p>}
       <ConsolidatedFacultyTimetable />
+      <OverallStaffTimetableFeature />
       </main>
     </div>
     <footer className="footer"><span>© {new Date().getFullYear()} Manakula Vinayagar Institute of Technology, Puducherry</span><span>College Timetable Generator <i /> {selection.department} Department</span></footer>
