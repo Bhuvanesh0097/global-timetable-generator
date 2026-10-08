@@ -1,3 +1,5 @@
+import type { CollegeTimings } from './college-timings.ts'
+
 export type SectionName = string
 
 export interface StaffMember {
@@ -85,6 +87,8 @@ export type WeekDay = 'Monday' | 'Tuesday' | 'Wednesday' | 'Thursday' | 'Friday'
 
 export interface TimetableSetup {
   academic: AcademicDetails
+  /** Optional institution timing snapshot; omitted values retain the current 6-day/8-period defaults. */
+  collegeTimings?: CollegeTimings
   /** Optional CSE scheduler profile controls; omitted values retain existing 3rd-Year defaults. */
   schedulerProfile?: {
     placement: 'required' | 'not-used'
