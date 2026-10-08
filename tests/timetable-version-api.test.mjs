@@ -2,6 +2,8 @@ import assert from 'node:assert/strict'
 import nodeTest from 'node:test'
 import { createServer } from 'node:http'
 import { createTimetableApiMiddleware } from '../backend/timetable-api.mjs'
+import { getDefaultCollegeTimings } from '../src/college-timings.ts'
+import { buildOfficialTimetableGrid } from '../src/official-timetable-grid.ts'
 import { createTestPostgresRepository, hasPostgresTestDatabase } from './postgres-test-helpers.mjs'
 
 const test = hasPostgresTestDatabase ? nodeTest : nodeTest.skip
@@ -59,6 +61,7 @@ nodeTest('version API accepts a valid non-default College Timings domain when sa
     const payload = await response.json()
     assert.equal(response.status, 201, payload.error)
     assert.equal(persisted.setupSnapshot.collegeTimings.periodsPerDay, 7)
+    assert.deepEqual(persisted.setupSnapshot.collegeTimings, collegeTimings)
     assert.deepEqual(Object.keys(persisted.sections[0].schedule), collegeTimings.workingWeekdays)
     assert.equal(Object.values(persisted.sections[0].schedule).reduce((total, day) => total + Object.keys(day).length, 0), 35)
   } finally {
@@ -90,13 +93,14 @@ test('version API persists, locks, reloads, unlocks, and deletes a PostgreSQL ti
     const identity = {
       department: 'CSE', year: 'II / 2nd Year', semester: 'IV / 4th Semester', academicYear: '2026 - 2027',
     }
+    const collegeTimings = getDefaultCollegeTimings()
     const staff = [
       { id: 'teacher-1', name: 'Teacher One' },
       { id: 'teacher-2', name: 'Teacher Two' },
     ]
     const sections = [{ id: 'A', classAdvisorId: 'teacher-1' }]
     const configuration = {
-      ...identity, sections, staff,
+      ...identity, collegeTimings, sections, staff,
       subjects: [{ id: 'subject-1', code: 'CSE201', abbreviation: 'ALG', name: 'Algorithms', weeklyHours: 48,
         teacherAssignments: [{ sectionId: 'A', teacherId: 'teacher-1' }] }],
     }
@@ -107,7 +111,7 @@ test('version API persists, locks, reloads, unlocks, and deletes a PostgreSQL ti
       }]),
     )]))
     const setupSnapshot = {
-      academic: identity, staff, sections, coreSubjects: [], otherSubjectMaster: [], otherSubjects: [],
+      academic: identity, collegeTimings, staff, sections, coreSubjects: [], otherSubjectMaster: [], otherSubjects: [],
       labMaster: [], labAssignments: [], specialActivities: [], sectionSubjectAssignments: [],
       specialActivityAssignments: [],
     }
@@ -131,7 +135,9 @@ test('version API persists, locks, reloads, unlocks, and deletes a PostgreSQL ti
     const version = saved.timetableVersions.find(({ sectionName }) => sectionName === 'A')
     const lock = await fetch(`${origin}/api/timetable-versions/${version.versionId}/lock`, { method: 'POST' })
     assert.equal(lock.status, 200)
-    assert.equal((await lock.json()).savedVersion.status, 'LOCKED')
+    const locked = await lock.json()
+    assert.equal(locked.savedVersion.status, 'LOCKED')
+    assert.deepEqual(locked.savedTimetableVersion.setupSnapshot.collegeTimings, collegeTimings)
     await stopServer()
     await testDatabase.close(repository)
     repository = await testDatabase.open()
@@ -143,37 +149,68 @@ test('version API persists, locks, reloads, unlocks, and deletes a PostgreSQL ti
     assert.deepEqual(loaded.sections[0].schedule, schedule)
     assert.deepEqual(loaded.setupSnapshot, setupSnapshot)
     assert.equal(loaded.versions[0].status, 'LOCKED')
+    assert.deepEqual(loaded.setupSnapshot.collegeTimings, collegeTimings)
     const lockedWorkload = await repository.getActiveTeacherWeeklyWorkloadSections()
     assert.equal(lockedWorkload[0].normal.length, 48)
     assert.ok(lockedWorkload[0].normal.every(({ teacherId }) => teacherId === 'teacher-1'))
 
-    const replacementSchedule = Object.fromEntries(days.map((day) => [day, Object.fromEntries(
-      Array.from({ length: 8 }, (_, index) => [index + 1, {
+    const futureCollegeTimings = {
+      ...collegeTimings,
+      workingWeekdays: days.slice(0, 5),
+      periodsPerDay: 7,
+      teacherMaximumWeeklyPeriods: 40,
+    }
+    const replacementSchedule = Object.fromEntries(futureCollegeTimings.workingWeekdays.map((day) => [day, Object.fromEntries(
+      Array.from({ length: futureCollegeTimings.periodsPerDay }, (_, index) => [index + 1, {
         itemId: 'subject-1', name: 'Algorithms', abbreviation: 'ALG',
         teacherId: 'teacher-2', teacherName: 'Teacher Two', kind: 'core',
       }]),
     )]))
-    await repository.saveGeneratedTimetableData({
+    const futureSetupSnapshot = { ...setupSnapshot, collegeTimings: futureCollegeTimings }
+    const [futureVersion] = await repository.saveGeneratedTimetableData({
       configurationId: saved.configurationId,
       generationId: 'postgres-api-generation-2',
       sections: [{ sectionId: 'A', ...identity, schedule: replacementSchedule }],
       validation: { valid: true },
-      setupSnapshot,
+      setupSnapshot: futureSetupSnapshot,
       staff,
     })
+    const futureLoadResponse = await fetch(`${origin}/api/timetable-versions/${futureVersion.id}`)
+    const futureLoaded = await futureLoadResponse.json()
+    assert.equal(futureLoadResponse.status, 200)
+    assert.deepEqual(futureLoaded.setupSnapshot.collegeTimings, futureCollegeTimings)
+    assert.deepEqual(futureLoaded.sections[0].schedule, replacementSchedule)
+    const reopenedGrid = buildOfficialTimetableGrid(futureLoaded.setupSnapshot.collegeTimings)
+    assert.deepEqual(reopenedGrid.days, futureCollegeTimings.workingWeekdays)
+    assert.equal(reopenedGrid.rows.filter(({ kind }) => kind === 'period').length, 7)
+    assert.ok(reopenedGrid.rows.some(({ kind, label }) => kind === 'break' && label === 'Lunch'))
+
+    const versionHistory = await repository.getTimetableVersions(loaded.versions[0].timetableId)
+    assert.deepEqual(versionHistory.map(({ versionNumber, setupSnapshot: snapshot }) => ({
+      versionNumber, collegeTimings: snapshot.collegeTimings,
+    })), [
+      { versionNumber: 2, collegeTimings: futureCollegeTimings },
+      { versionNumber: 1, collegeTimings },
+    ])
     const replacementWorkload = await repository.getActiveTeacherWeeklyWorkloadSections()
     assert.equal(replacementWorkload.length, 1)
-    assert.equal(replacementWorkload[0].normal.length, 48)
+    assert.equal(replacementWorkload[0].normal.length, 35)
     assert.ok(replacementWorkload[0].normal.every(({ teacherId }) => teacherId === 'teacher-2'))
+    const staffTimetable = await repository.getOverallStaffTimetable('teacher-2')
+    assert.equal(staffTimetable.days.Monday[1].assignments.length, 1)
+    assert.equal(staffTimetable.days.Monday[1].assignments[0].versionId, futureVersion.id)
 
     const blockedDelete = await fetch(`${origin}/api/timetable-versions/${version.versionId}`, { method: 'DELETE' })
     assert.equal(blockedDelete.status, 409)
     const unlock = await fetch(`${origin}/api/timetable-versions/${version.versionId}/unlock`, { method: 'POST' })
     assert.equal(unlock.status, 200)
-    assert.equal((await unlock.json()).savedVersion.status, 'SAVED')
+    const unlocked = await unlock.json()
+    assert.equal(unlocked.savedVersion.status, 'SAVED')
+    assert.deepEqual(unlocked.savedTimetableVersion.setupSnapshot.collegeTimings, collegeTimings)
     const deletion = await fetch(`${origin}/api/timetable-versions/${version.versionId}`, { method: 'DELETE' })
     assert.equal(deletion.status, 200)
     assert.equal((await repository.getSavedTimetableNavigation()).length, 1)
+    assert.equal((await repository.getSavedTimetableNavigation())[0].versionId, futureVersion.id)
     const afterInactiveDelete = await repository.getActiveTeacherWeeklyWorkloadSections()
     assert.equal(afterInactiveDelete.length, 1)
     assert.ok(afterInactiveDelete[0].normal.every(({ teacherId }) => teacherId === 'teacher-2'))
