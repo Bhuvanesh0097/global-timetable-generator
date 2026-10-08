@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import {
-  BookOpen, ChevronDown, ChevronUp, LockKeyhole,
+  BookOpen, ChevronDown, ChevronUp, Clock3, LockKeyhole,
   FlaskConical, GraduationCap, Plus, Settings2, Sparkles, Star, Trash2, Users,
 } from 'lucide-react'
 import type { CoreSubject, LabAssignment, LabDefinition, OtherSubject, Section, SectionName, SectionSubjectAssignment, SpecialActivity, SpecialActivityAssignment, StaffMember, TimetableSetup, WeekDay } from './models'
@@ -14,6 +14,8 @@ import { OverallStaffTimetableFeature } from './OverallStaffTimetable'
 import { getGenerateTimetableLabel, getSectionCountLabel, getSectionIds, initializeConfiguredSections } from './section-configuration'
 import { globalStaffMaster } from './staff-identities'
 import { TeacherSelector } from './TeacherSelector'
+import { CollegeTimingsPanel } from './CollegeTimingsSection'
+import { getDefaultCollegeTimings } from './college-timings.ts'
 import type { GenericGeneratedSection, GenericScheduledAlternateSubject, GenericTimetableGenerationResult } from './generic-scheduling-model.ts'
 import { acknowledgeGeneratedTimetable, deleteSavedTimetableVersion, generateGenericTimetableOnServer, listSavedTimetableNavigation, listSavedTimetableVersions, loadSavedTeacherUnavailableSlots, loadSavedTimetableVersion, saveTimetableVersion, setSavedTimetableVersionLock, type SavedTimetableNavigationEntry, type SavedTimetableVersionSummary } from './timetable-version-client'
 
@@ -145,7 +147,7 @@ function genericWorkloadIssue(total: number): string | null {
   return null
 }
 
-type SectionKey = 'academic' | 'staff' | 'sections' | 'coreSubjects' | 'otherSubjects' | 'labs' | 'specialActivities' | 'rules'
+type SectionKey = 'collegeTimings' | 'academic' | 'staff' | 'sections' | 'coreSubjects' | 'otherSubjects' | 'labs' | 'specialActivities' | 'rules'
 interface AccordionProps { id: SectionKey; number: string; title: string; description: string; icon: typeof GraduationCap; count?: string; open: boolean; onToggle: (id: SectionKey) => void; children: React.ReactNode }
 
 function Accordion({ id, number, title, description, icon: Icon, count, open, onToggle, children }: AccordionProps) {
@@ -1097,6 +1099,7 @@ function App() {
   const generationRequestInFlightRef = useRef(false)
   selectionRef.current = selection
   const [configurations, setConfigurations] = useState<Record<string, TimetableSetup>>({})
+  const [collegeTimings, setCollegeTimings] = useState(getDefaultCollegeTimings)
   const [sectionCountInput, setSectionCountInput] = useState('1')
   const [generatedTargetSchedules, setGeneratedTargetSchedules] = useState<Record<string, GenericGeneratedSection[]>>({})
   const selectedConfigurationKey = academicConfigurationKey(selection)
@@ -1998,6 +2001,9 @@ function App() {
       <main className="main-content">
       <div className="page-intro"><p className="eyebrow">ACADEMIC PLANNING</p><h1>College Timetable Generator</h1><p className="subtitle">Timetable Generator for Mrs. R. Indumathi</p><div className="intro-college"><GraduationCap size={17} /> Manakula Vinayagar Institute of Technology</div></div>
       <div className="section-list">
+        <Accordion id="collegeTimings" number="00" title="COLLEGE TIMINGS" description="Configure the institution-wide working week and period timings." icon={Clock3} open={openSection === 'collegeTimings'} onToggle={toggle}>
+          <CollegeTimingsPanel value={collegeTimings} onChange={setCollegeTimings} />
+        </Accordion>
         <Accordion id="academic" number="01" title="Academic Details" description="Select the academic configuration for this timetable." icon={GraduationCap} open={openSection === 'academic'} onToggle={toggle}>
           <div className="academic-details-grid">
             <Field label="Department" value={selection.department} choices={departments.map((department) => ({ value: department, label: department }))} onChange={(department) => updateSelection({ department })} />
