@@ -15,7 +15,8 @@ import { getGenerateTimetableLabel, getSectionCountLabel, getSectionIds, initial
 import { globalStaffMaster } from './staff-identities'
 import { TeacherSelector } from './TeacherSelector'
 import { CollegeTimingsPanel } from './CollegeTimingsSection'
-import { calculateCollegeTimings, getDefaultCollegeTimings, usesDefaultCollegeTimetableLayout } from './college-timings.ts'
+import { getDefaultCollegeTimings, usesDefaultCollegeTimetableLayout } from './college-timings.ts'
+import { buildOfficialTimetableGrid, getOfficialGridDayRowHeight, timetableRows } from './official-timetable-grid.ts'
 import type { GenericGeneratedSection, GenericScheduledAlternateSubject, GenericScheduledCell, GenericTimetableGenerationResult } from './generic-scheduling-model.ts'
 import { acknowledgeGeneratedTimetable, deleteSavedTimetableVersion, generateGenericTimetableOnServer, listSavedTimetableNavigation, listSavedTimetableVersions, loadSavedTeacherUnavailableSlots, loadSavedTimetableVersion, saveTimetableVersion, setSavedTimetableVersionLock, type SavedTimetableNavigationEntry, type SavedTimetableVersionSummary } from './timetable-version-client'
 
@@ -35,51 +36,6 @@ interface AcademicConfigurationSelection {
 }
 const academicConfigurationKey = ({ department, year, semester }: AcademicConfigurationSelection) => `${department}|${year}|${semester}`
 const weekDays: WeekDay[] = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
-const timetableRows = [
-  { kind: 'period', label: 'P1', time: '8:50 AM – 9:40 AM' },
-  { kind: 'period', label: 'P2', time: '9:40 AM – 10:30 AM' },
-  { kind: 'break', label: 'Break', time: '10:30 AM – 10:45 AM' },
-  { kind: 'period', label: 'P3', time: '10:45 AM – 11:35 AM' },
-  { kind: 'period', label: 'P4', time: '11:35 AM – 12:25 PM' },
-  { kind: 'break', label: 'Lunch', time: '12:25 PM – 1:10 PM' },
-  { kind: 'period', label: 'P5', time: '1:10 PM – 2:00 PM' },
-  { kind: 'period', label: 'P6', time: '2:00 PM – 2:50 PM' },
-  { kind: 'break', label: 'Tea Break', time: '2:50 PM – 3:00 PM' },
-  { kind: 'period', label: 'P7', time: '3:00 PM – 3:50 PM' },
-  { kind: 'period', label: 'P8', time: '3:50 PM – 4:40 PM' },
-] as const
-type TimetableGridSlot = { kind: 'period'; label: string; period: number; time: string }
-  | { kind: 'break'; label: string; time: string }
-
-function clockLabel(value: string): string {
-  const [hours, minutes] = value.split(':').map(Number)
-  const suffix = hours < 12 ? 'AM' : 'PM'
-  const hour = hours % 12 || 12
-  return `${hour}:${String(minutes).padStart(2, '0')} ${suffix}`
-}
-
-function collegeTimetableGrid(setup: TimetableSetup): { days: string[]; rows: TimetableGridSlot[] } {
-  const timings = setup.collegeTimings ?? getDefaultCollegeTimings()
-  const days = [...timings.workingWeekdays]
-  const usesLegacyLayout = usesDefaultCollegeTimetableLayout(timings)
-  if (usesLegacyLayout) return { days, rows: timetableRows.map((slot) => ({ ...slot, period: slot.kind === 'period' ? Number(slot.label.slice(1)) : undefined } as TimetableGridSlot)) }
-
-  const derived = calculateCollegeTimings(timings)
-  const breaksAfter = new Map(derived.breakTimings.map((entry) => [entry.afterPeriod, entry]))
-  const rows: TimetableGridSlot[] = []
-  for (const period of derived.periodTimings) {
-    rows.push({
-      kind: 'period', label: `P${period.period}`, period: period.period,
-      time: `${clockLabel(period.startTime)} – ${clockLabel(period.endTime)}`,
-    })
-    const breakTiming = breaksAfter.get(period.period)
-    if (breakTiming) rows.push({
-      kind: 'break', label: breakTiming.name,
-      time: `${clockLabel(breakTiming.startTime)} – ${clockLabel(breakTiming.endTime)}`,
-    })
-  }
-  return { days, rows }
-}
 const academicYearLabel = '2026 - 2027'
 
 function uniqueStaffMembers(members: StaffMember[]): StaffMember[] {
@@ -498,8 +454,8 @@ function OfficialTimetable({ setup, generatedSection, onElement }: { setup: Time
   const section = setup.sections.find((item) => item.id === sectionId)
   const advisor = setup.staff.find((person) => person.id === section?.classAdvisorId)
   const subjectRows = getTimetableSubjectRows(setup, sectionId, generatedSection)
-  const documentSizing = getDocumentSizing(subjectRows.length)
-  const { days, rows } = collegeTimetableGrid(setup)
+  const { days, rows } = buildOfficialTimetableGrid(setup.collegeTimings)
+  const documentSizing = getDocumentSizing(subjectRows.length, 0, days.length)
   const semesterNumber = setup.academic.semester.split(' / ')[0]
   const semesterKind = ['I', 'III', 'V', 'VII'].includes(semesterNumber) ? 'ODD' : 'EVEN'
   const departmentName = setup.academic.department === 'CSE' ? 'Computer Science & Engineering' : setup.academic.department === 'RA' ? 'Robotics and Automation' : setup.academic.department
@@ -509,6 +465,7 @@ function OfficialTimetable({ setup, generatedSection, onElement }: { setup: Time
     ref={onElement}
     style={{
       '--document-grid-height': `${documentSizing.gridHeight}mm`,
+      '--document-day-row-height': `${documentSizing.dayRowHeight}mm`,
       '--document-subject-table-height': `${documentSizing.subjectTableHeight}mm`,
       '--document-subject-row-height': `${documentSizing.subjectRowHeight}mm`,
       '--document-density': String(documentSizing.density),
@@ -860,7 +817,8 @@ export function GeneratedTimetablePreview({ setup, result, onSave, preferredSect
   const capturePdfSection = async (element: HTMLElement) => {
     const { default: html2canvas } = await import('html2canvas')
     const subjectRows = element.querySelectorAll('.official-subject-table tbody tr').length
-    const pdfSizing = getPdfDocumentSizing(subjectRows)
+    const dayCount = element.querySelectorAll('.official-grid tbody tr').length
+    const pdfSizing = getPdfDocumentSizing(subjectRows, dayCount)
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
     return html2canvas(element, {
       // 300 dpi at CSS's 96 px/in gives crisp print output while keeping the
@@ -881,6 +839,7 @@ export function GeneratedTimetablePreview({ setup, result, onSave, preferredSect
         clone.style.boxSizing = 'border-box'
         clone.style.padding = '0'
         clone.style.setProperty('--export-grid-height', `${pdfSizing.gridHeight}mm`)
+        clone.style.setProperty('--export-day-row-height', `${pdfSizing.dayRowHeight}mm`)
         clone.style.setProperty('--export-subject-height', `${pdfSizing.subjectTableHeight}mm`)
         clone.style.setProperty('--export-subject-row-height', `${pdfSizing.subjectRowHeight}mm`)
         clone.style.setProperty('--export-density-scale', String(pdfSizing.density))
@@ -903,8 +862,10 @@ export function GeneratedTimetablePreview({ setup, result, onSave, preferredSect
 
   const printSection = (sectionId: SectionName) => withExport(sectionId, async (element) => {
     const subjectRows = element.querySelectorAll('.official-subject-table tbody tr').length
-    const pdfSizing = getPdfDocumentSizing(subjectRows)
+    const dayCount = element.querySelectorAll('.official-grid tbody tr').length
+    const pdfSizing = getPdfDocumentSizing(subjectRows, dayCount)
     element.style.setProperty('--export-grid-height', `${pdfSizing.gridHeight}mm`)
+    element.style.setProperty('--export-day-row-height', `${pdfSizing.dayRowHeight}mm`)
     element.style.setProperty('--export-subject-height', `${pdfSizing.subjectTableHeight}mm`)
     element.style.setProperty('--export-subject-row-height', `${pdfSizing.subjectRowHeight}mm`)
     element.style.setProperty('--export-density-scale', String(pdfSizing.density))
@@ -916,6 +877,7 @@ export function GeneratedTimetablePreview({ setup, result, onSave, preferredSect
       delete element.dataset.exportLayout
       delete element.dataset.pdfLayout
       element.style.removeProperty('--export-grid-height')
+      element.style.removeProperty('--export-day-row-height')
       element.style.removeProperty('--export-subject-height')
       element.style.removeProperty('--export-subject-row-height')
       element.style.removeProperty('--export-density-scale')
@@ -1008,20 +970,23 @@ export function GeneratedTimetablePreview({ setup, result, onSave, preferredSect
 function applyExportSizing(element: HTMLElement) {
   const rows = Array.from(element.querySelectorAll('.official-subject-table tbody tr'))
   const longestCell = Math.max(0, ...Array.from(element.querySelectorAll('.official-subject-table td, .official-grid td span'), (cell) => cell.textContent?.trim().length ?? 0))
-  const sizing = getDocumentSizing(rows.length, longestCell)
+  const dayCount = element.querySelectorAll('.official-grid tbody tr').length
+  const sizing = getDocumentSizing(rows.length, longestCell, dayCount)
   element.style.setProperty('--document-density', String(sizing.density))
   element.style.setProperty('--document-grid-height', `${sizing.gridHeight}mm`)
+  element.style.setProperty('--document-day-row-height', `${sizing.dayRowHeight}mm`)
   element.style.setProperty('--document-subject-table-height', `${sizing.subjectTableHeight}mm`)
   element.style.setProperty('--document-subject-row-height', `${sizing.subjectRowHeight}mm`)
   return () => {
     element.style.removeProperty('--document-density')
     element.style.removeProperty('--document-grid-height')
+    element.style.removeProperty('--document-day-row-height')
     element.style.removeProperty('--document-subject-table-height')
     element.style.removeProperty('--document-subject-row-height')
   }
 }
 
-function getDocumentSizing(rowCount: number, longestCell = 0) {
+function getDocumentSizing(rowCount: number, longestCell = 0, dayCount = 6) {
   // A4's 283mm inner height is shared by fixed header/footer areas, the dynamic
   // subject table, and a generous timetable grid. This stays row-driven rather
   // than assuming a fixed number of subjects.
@@ -1031,17 +996,19 @@ function getDocumentSizing(rowCount: number, longestCell = 0) {
   const subjectRowHeight = Math.max(3.4, Math.min(5.8, (availableForGridAndRows - minimumGridHeight) / safeRowCount))
   const gridHeight = Math.max(minimumGridHeight, availableForGridAndRows - safeRowCount * subjectRowHeight)
   const density = Math.max(0.82, Math.min(1, 1 - Math.max(0, safeRowCount - 18) * 0.012 - Math.max(0, longestCell - 34) * 0.002))
-  return { gridHeight, subjectTableHeight: 8 + safeRowCount * subjectRowHeight, subjectRowHeight, density }
+  const dayRowHeight = getOfficialGridDayRowHeight(gridHeight, 36.4, dayCount)
+  return { gridHeight, dayRowHeight, subjectTableHeight: 8 + safeRowCount * subjectRowHeight, subjectRowHeight, density }
 }
 
-function getPdfDocumentSizing(rowCount: number) {
+function getPdfDocumentSizing(rowCount: number, dayCount = 6) {
   const safeRowCount = Math.max(1, rowCount)
-  // The A3 landscape sheet has 205mm available for the six-day grid and the
+  // The A3 landscape sheet has 205mm available for the configured day grid and the
   // variable-height subject/staff rows after its fixed header and footer.
   const subjectRowHeight = Math.min(7.2, 105 / safeRowCount)
   const gridHeight = Math.max(100, 205 - safeRowCount * subjectRowHeight)
   const density = Math.max(0.78, Math.min(1, subjectRowHeight / 7.2))
-  return { gridHeight, subjectTableHeight: 9 + safeRowCount * subjectRowHeight, subjectRowHeight, density }
+  const dayRowHeight = getOfficialGridDayRowHeight(gridHeight, 21, dayCount)
+  return { gridHeight, dayRowHeight, subjectTableHeight: 9 + safeRowCount * subjectRowHeight, subjectRowHeight, density }
 }
 
 function isCompleteGeneratedResult(result: Extract<GenericTimetableGenerationResult, { ok: true }>, sectionIds: SectionName[], setup: TimetableSetup): boolean {
