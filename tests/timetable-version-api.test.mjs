@@ -7,6 +7,65 @@ import { createTestPostgresRepository, hasPostgresTestDatabase } from './postgre
 const test = hasPostgresTestDatabase ? nodeTest : nodeTest.skip
 const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
 
+nodeTest('version API accepts a valid non-default College Timings domain when saving', async () => {
+  const identity = {
+    department: 'CSE', year: 'II / 2nd Year', semester: 'IV / 4th Semester', academicYear: '2026 - 2027',
+  }
+  const collegeTimings = {
+    workingWeekdays: ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'],
+    periodsPerDay: 7,
+    periodDurationMinutes: 50,
+    collegeStartTime: '08:50',
+    breaks: [
+      { kind: 'break', name: 'Morning Break', afterPeriod: 2, durationMinutes: 15 },
+      { kind: 'lunch', name: 'Lunch', afterPeriod: 3, durationMinutes: 45 },
+    ],
+    timingMode: 'automatic',
+    teacherMaximumWeeklyPeriods: 40,
+  }
+  const staff = [{ id: 'teacher-domain', name: 'Teacher Domain' }]
+  const schedules = Object.fromEntries(collegeTimings.workingWeekdays.map((day) => [day,
+    Object.fromEntries(Array.from({ length: collegeTimings.periodsPerDay }, (_, index) => [index + 1, {
+      itemId: 'subject-domain', name: 'Configured Subject', abbreviation: 'CS', teacherId: staff[0].id, kind: 'core',
+    }]))]))
+  let persisted
+  const repository = {
+    async getTimetableConfigurationByIdentity() { return 'configuration-domain' },
+    async withSaveTransaction(work) { return work() },
+    async getSavedGeneration() { return null },
+    async saveGeneratedTimetableData(input) { persisted = input },
+    async getSavedGenerationSummaries() { return [{ generationId: 'generation-domain', versionNumber: 1 }] },
+    async getSavedTimetableNavigation() { return [] },
+  }
+  const middleware = createTimetableApiMiddleware(repository)
+  const server = createServer((request, response) => {
+    void middleware(request, response, () => { response.statusCode = 404; response.end() })
+  })
+  await new Promise((resolve, reject) => server.listen(0, '127.0.0.1', (error) => error ? reject(error) : resolve()))
+  try {
+    const setupSnapshot = {
+      academic: identity, collegeTimings, staff, sections: [{ id: 'A' }], coreSubjects: [], otherSubjectMaster: [],
+      otherSubjects: [], labMaster: [], labAssignments: [], specialActivities: [], sectionSubjectAssignments: [],
+      specialActivityAssignments: [],
+    }
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/api/timetable-versions`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        configuration: { ...identity, collegeTimings, sections: [{ id: 'A' }], staff, subjects: [] },
+        generationId: 'generation-domain', sections: [{ sectionId: 'A', ...identity, schedule: schedules }],
+        setupSnapshot, validation: { periodsFilled: 35 },
+      }),
+    })
+    const payload = await response.json()
+    assert.equal(response.status, 201, payload.error)
+    assert.equal(persisted.setupSnapshot.collegeTimings.periodsPerDay, 7)
+    assert.deepEqual(Object.keys(persisted.sections[0].schedule), collegeTimings.workingWeekdays)
+    assert.equal(Object.values(persisted.sections[0].schedule).reduce((total, day) => total + Object.keys(day).length, 0), 35)
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
 test('version API persists, locks, reloads, unlocks, and deletes a PostgreSQL timetable', async () => {
   const testDatabase = await createTestPostgresRepository()
   let repository = testDatabase.repository

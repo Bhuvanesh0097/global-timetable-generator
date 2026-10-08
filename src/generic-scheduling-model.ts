@@ -1,3 +1,5 @@
+import type { CollegeTimings, CollegeWeekday } from './college-timings.ts'
+
 /**
  * Department-neutral scheduling input. This model is intentionally separate
  * from the legacy department profiles so new schedules can be described by
@@ -5,7 +7,7 @@
  */
 
 export const genericTimetableDays = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'] as const
-export type GenericWeekDay = typeof genericTimetableDays[number]
+export type GenericWeekDay = CollegeWeekday
 export const genericPeriodsPerDay = 8
 export const genericStudentSlotsPerWeek = genericTimetableDays.length * genericPeriodsPerDay
 
@@ -145,6 +147,8 @@ export interface GenericScheduleConfig {
   academicYear: string
   year: string
   semester: string
+  /** Optional institution timetable domain; omitted values use the legacy 6×8 schedule. */
+  collegeTimings?: CollegeTimings
   sections: GenericSection[]
   staff: GenericStaff[]
   subjects: GenericSubject[]
@@ -214,7 +218,7 @@ export interface GenericGeneratedSection {
   academicYear: string
   year: string
   semester: string
-  schedule: Record<GenericWeekDay, Record<number, GenericScheduledCell>>
+  schedule: Partial<Record<GenericWeekDay, Record<number, GenericScheduledCell>>>
 }
 
 export interface GenericSectionValidationSummary {

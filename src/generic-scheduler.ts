@@ -8,6 +8,8 @@ import type {
   GenericPlacementAlternateSubject,
 } from './generic-scheduling-model.ts'
 import { genericPeriodsPerDay, genericStudentSlotsPerWeek, genericTimetableDays } from './generic-scheduling-model.ts'
+import type { CollegeTimings } from './college-timings.ts'
+import { collegeWeekdays, usesDefaultCollegeTimetableDomain, validateCollegeTimings } from './college-timings.ts'
 
 type ItemKind = GenericScheduledCell['kind']
 
@@ -118,6 +120,36 @@ interface NormalizedProfile {
 }
 
 const periods = Array.from({ length: genericPeriodsPerDay }, (_, index) => index + 1)
+interface SchedulerDomain {
+  days: readonly GenericWeekDay[]
+  periodsPerDay: number
+  periods: number[]
+  studentCapacity: number
+  lunchAfterPeriod: number
+}
+
+const defaultDomain: SchedulerDomain = {
+  days: genericTimetableDays,
+  periodsPerDay: genericPeriodsPerDay,
+  periods,
+  studentCapacity: genericStudentSlotsPerWeek,
+  lunchAfterPeriod: 4,
+}
+
+function schedulerDomain(timings?: CollegeTimings): SchedulerDomain {
+  if (!timings || usesDefaultCollegeTimetableDomain(timings)) return defaultDomain
+  if (!Array.isArray(timings.workingWeekdays) || !timings.workingWeekdays.length
+    || !Number.isSafeInteger(timings.periodsPerDay) || timings.periodsPerDay < 1
+    || !Array.isArray(timings.breaks)) return defaultDomain
+  const lunchAfterPeriod = timings.breaks.find((entry) => entry.kind === 'lunch')?.afterPeriod ?? 4
+  return {
+    days: timings.workingWeekdays,
+    periodsPerDay: timings.periodsPerDay,
+    periods: Array.from({ length: timings.periodsPerDay }, (_, index) => index + 1),
+    studentCapacity: timings.workingWeekdays.length * timings.periodsPerDay,
+    lunchAfterPeriod,
+  }
+}
 const defaultSearchNodeLimit = 1_000_000
 const maximumSearchNodeLimit = 1_000_000
 const maximumCandidateCount = 20
@@ -164,18 +196,20 @@ function placementBlockDurations(weeklyPeriods: number, blockDuration: number): 
   return remainder ? [...blocks, remainder] : blocks
 }
 
-function validStartsForBlock(opts: { isLab?: boolean; isPlacement?: boolean; isNormalActivity?: boolean; allowedStartPeriods?: number[] }, duration: number, rules: GenericSchedulingRules): number[] {
-  let starts = periods.filter((start) => start + duration - 1 <= genericPeriodsPerDay)
+function validStartsForBlock(opts: { isLab?: boolean; isPlacement?: boolean; isNormalActivity?: boolean; allowedStartPeriods?: number[] }, duration: number, rules: GenericSchedulingRules, domain: SchedulerDomain = defaultDomain): number[] {
+  let starts = domain.periods.filter((start) => start + duration - 1 <= domain.periodsPerDay)
   if (opts.isLab) {
-    starts = duration === 4 ? [1, 5] : [2, 3, 4, 6, 7, 8]
-      .filter((start) => start + duration - 1 <= genericPeriodsPerDay && !crossesLunch(start, duration))
+    const fourthPeriodSegmentStarts = new Set([1, domain.lunchAfterPeriod + 1])
+    starts = duration === 4
+      ? starts.filter((start) => fourthPeriodSegmentStarts.has(start) && !crossesLunch(start, duration, domain.lunchAfterPeriod))
+      : starts.filter((start) => !fourthPeriodSegmentStarts.has(start) && !crossesLunch(start, duration, domain.lunchAfterPeriod))
   } else if (opts.isPlacement) {
-    starts = starts.filter((start) => Math.floor((start - 1) / 4) === Math.floor((start + duration - 2) / 4))
+    starts = starts.filter((start) => !crossesLunch(start, duration, domain.lunchAfterPeriod))
   } else if (opts.isNormalActivity) {
     starts = starts.filter((start) => start !== 1
-      && (duration === 1 || rules.blocksAvoidLunch === false || !crossesLunch(start, duration)))
+      && (duration === 1 || rules.blocksAvoidLunch === false || !crossesLunch(start, duration, domain.lunchAfterPeriod)))
   } else if (duration > 1 && rules.blocksAvoidLunch !== false) {
-    starts = starts.filter((start) => !crossesLunch(start, duration))
+    starts = starts.filter((start) => !crossesLunch(start, duration, domain.lunchAfterPeriod))
   }
   if (opts.allowedStartPeriods) starts = starts.filter((start) => opts.allowedStartPeriods!.includes(start))
   return starts
@@ -192,8 +226,9 @@ function normalizeRows<T extends { id: string; name: string; code?: string; abbr
   profileKey: string,
   usedIds: Set<string>,
   issues: string[],
-  opts: { isCore?: boolean; isLab?: boolean; isPlacement?: boolean; isNormalActivity?: boolean; enabled?: (row: T) => boolean; placementException?: GenericPlacementExceptionConfig } = {},
+  opts: { isCore?: boolean; isLab?: boolean; isPlacement?: boolean; isNormalActivity?: boolean; enabled?: (row: T) => boolean; placementException?: GenericPlacementExceptionConfig; domain?: SchedulerDomain } = {},
 ): void {
+  const domain = opts.domain ?? defaultDomain
   for (const row of rows ?? []) {
     if (!row.id.trim() || usedIds.has(row.id)) {
       issues.push(`Work-item ID “${row.id}” is empty or duplicated.`)
@@ -211,7 +246,7 @@ function normalizeRows<T extends { id: string; name: string; code?: string; abbr
     if (!Number.isInteger(count) || count <= 0) issues.push(`${row.name || row.id} needs a positive whole-number weekly period count.`)
     if (!isPositiveInteger(duration)) issues.push(`${row.name || row.id} needs a positive whole-number block duration.`)
     if ((opts.isLab || opts.isPlacement) && duration > 4) issues.push(`${row.name || row.id}: the current generic timetable framework supports a maximum 4-period continuous ${opts.isLab ? 'lab' : 'Placement'} block.`)
-    if (row.allowedStartPeriods?.some((start) => !Number.isInteger(start) || start < 1 || start > genericPeriodsPerDay)) {
+    if (row.allowedStartPeriods?.some((start) => !Number.isInteger(start) || start < 1 || start > domain.periodsPerDay)) {
       issues.push(`${row.name || row.id} has an invalid allowed block start period.`)
     }
     if (!Number.isInteger(count) || count <= 0 || !isPositiveInteger(duration) || ((opts.isLab || opts.isPlacement) && duration > 4)) continue
@@ -225,7 +260,7 @@ function normalizeRows<T extends { id: string; name: string; code?: string; abbr
         ? placementBlockDurations(count, duration)
         : Array.from({ length: count / duration }, () => duration)
     for (const blockLength of blockDurations) {
-      if (!validStartsForBlock({ isLab: opts.isLab, isPlacement: opts.isPlacement, isNormalActivity: opts.isNormalActivity, allowedStartPeriods: row.allowedStartPeriods }, blockLength, input.rules ?? {}).length) {
+      if (!validStartsForBlock({ isLab: opts.isLab, isPlacement: opts.isPlacement, isNormalActivity: opts.isNormalActivity, allowedStartPeriods: row.allowedStartPeriods }, blockLength, input.rules ?? {}, domain).length) {
         issues.push(`${row.name || row.id} has no valid start for its ${blockLength}-period block within the teaching day.`)
       }
     }
@@ -277,8 +312,9 @@ function normalizeRows<T extends { id: string; name: string; code?: string; abbr
   }
 }
 
-function validateProfile(input: GenericScheduleConfig, profileKey: string, qualifySectionKeys: boolean): NormalizedProfile {
+function validateProfile(input: GenericScheduleConfig, profileKey: string, qualifySectionKeys: boolean, domain: SchedulerDomain = schedulerDomain(input.collegeTimings)): NormalizedProfile {
   const issues: string[] = []
+  if (input.collegeTimings) issues.push(...validateCollegeTimings(input.collegeTimings))
   if (!input.department.trim()) issues.push('Department is required.')
   if (!input.academicYear.trim()) issues.push('Academic Year is required.')
   if (!input.year.trim()) issues.push('Year is required.')
@@ -328,31 +364,37 @@ function validateProfile(input: GenericScheduleConfig, profileKey: string, quali
   }))
   const itemsBySection = new Map(sections.map(({ key }) => [key, [] as WorkItem[]]))
   const usedIds = new Set<string>()
-  normalizeRows<GenericSubject>(input.subjects, 'core', (row) => row.weeklyHours, (row) => row.blockDuration ?? 1, input, itemsBySection, sectionKeys, profileKey, usedIds, issues, { isCore: true })
-  normalizeRows<GenericOtherSubject>(input.otherSubjects, 'other', (row) => row.weeklyHours, (row) => row.blockDuration ?? 1, input, itemsBySection, sectionKeys, profileKey, usedIds, issues, { enabled: (row) => row.enabled !== false })
-  normalizeRows<GenericLab>(input.labs, 'lab', (row) => row.weeklyPeriods, (row) => Math.min(row.weeklyPeriods, 4), input, itemsBySection, sectionKeys, profileKey, usedIds, issues, { isLab: true, enabled: (row) => row.enabled !== false })
-  normalizeRows<GenericActivity>(input.specialActivities, 'activity', (row) => row.weeklyPeriods, (row) => row.blockDuration ?? 1, input, itemsBySection, sectionKeys, profileKey, usedIds, issues, { isNormalActivity: true, enabled: (row) => row.enabled })
+  normalizeRows<GenericSubject>(input.subjects, 'core', (row) => row.weeklyHours, (row) => row.blockDuration ?? 1, input, itemsBySection, sectionKeys, profileKey, usedIds, issues, { isCore: true, domain })
+  normalizeRows<GenericOtherSubject>(input.otherSubjects, 'other', (row) => row.weeklyHours, (row) => row.blockDuration ?? 1, input, itemsBySection, sectionKeys, profileKey, usedIds, issues, { enabled: (row) => row.enabled !== false, domain })
+  normalizeRows<GenericLab>(input.labs, 'lab', (row) => row.weeklyPeriods, (row) => Math.min(row.weeklyPeriods, 4), input, itemsBySection, sectionKeys, profileKey, usedIds, issues, { isLab: true, enabled: (row) => row.enabled !== false, domain })
+  normalizeRows<GenericActivity>(input.specialActivities, 'activity', (row) => row.weeklyPeriods, (row) => row.blockDuration ?? 1, input, itemsBySection, sectionKeys, profileKey, usedIds, issues, { isNormalActivity: true, enabled: (row) => row.enabled, domain })
 
   if (input.placement) {
     if (typeof input.placement.enabled !== 'boolean') issues.push('Placement needs an explicit enabled/disabled value.')
     if (input.placement.enabled) {
-      normalizeRows([input.placement], 'activity', (row) => row.weeklyPeriods, (row) => row.weeklyPeriods, input, itemsBySection, sectionKeys, profileKey, usedIds, issues, { isPlacement: true, placementException: input.placementException })
+      normalizeRows([input.placement], 'activity', (row) => row.weeklyPeriods, (row) => row.weeklyPeriods, input, itemsBySection, sectionKeys, profileKey, usedIds, issues, { isPlacement: true, placementException: input.placementException, domain })
     }
   }
 
   for (const section of input.sections) {
     const weeklyTotal = itemsBySection.get(sectionKeys.get(section.id)!)!.reduce((total, item) => total + item.weeklyPeriods, 0)
-    if (weeklyTotal !== genericStudentSlotsPerWeek) {
-      const difference = Math.abs(genericStudentSlotsPerWeek - weeklyTotal)
-      issues.push(weeklyTotal < genericStudentSlotsPerWeek
-        ? `Configured workload is ${weeklyTotal} periods for ${input.department} Section ${section.id}, but timetable capacity is fixed at ${genericStudentSlotsPerWeek} periods. ${difference} periods remain unconfigured. Please complete the workload to exactly ${genericStudentSlotsPerWeek} periods.`
-        : `Configured workload is ${weeklyTotal} periods for ${input.department} Section ${section.id}, but timetable capacity is fixed at ${genericStudentSlotsPerWeek} periods. Please reduce the configured workload by ${difference} periods.`)
+    if (weeklyTotal !== domain.studentCapacity) {
+      const difference = Math.abs(domain.studentCapacity - weeklyTotal)
+      if (domain === defaultDomain) {
+        issues.push(weeklyTotal < domain.studentCapacity
+          ? `Configured workload is ${weeklyTotal} periods for ${input.department} Section ${section.id}, but timetable capacity is fixed at 48 periods. ${difference} periods remain unconfigured. Please complete the workload to exactly 48 periods.`
+          : `Configured workload is ${weeklyTotal} periods for ${input.department} Section ${section.id}, but timetable capacity is fixed at 48 periods. Please reduce the configured workload by ${difference} periods.`)
+      } else {
+        issues.push(weeklyTotal < domain.studentCapacity
+          ? `Configured workload is ${weeklyTotal} periods for ${input.department} Section ${section.id}, but timetable capacity is ${domain.studentCapacity} periods. ${difference} periods remain unconfigured. Please complete the workload to exactly ${domain.studentCapacity} periods.`
+          : `Configured workload is ${weeklyTotal} periods for ${input.department} Section ${section.id}, but timetable capacity is ${domain.studentCapacity} periods. Please reduce the configured workload by ${difference} periods.`)
+      }
     }
     const activityBlocks = itemsBySection.get(sectionKeys.get(section.id)!)!
       .filter((item) => isNormalActivity(item))
       .reduce((total, item) => total + item.blockDurations.length, 0)
-    if (activityBlocks > genericTimetableDays.length) {
-      issues.push(`Section ${section.id} has ${activityBlocks} normal Special Activity blocks, but the maximum is ${genericTimetableDays.length} because only one can be scheduled per day.`)
+    if (activityBlocks > domain.days.length) {
+      issues.push(`Section ${section.id} has ${activityBlocks} normal Special Activity blocks, but the maximum is ${domain.days.length} because only one can be scheduled per day.`)
     }
   }
 
@@ -382,10 +424,10 @@ function validateProfile(input: GenericScheduleConfig, profileKey: string, quali
         }
       }
     }
-    if (testTasks.length / Math.max(1, input.sections.length) > genericTimetableDays.length) {
+    if (testTasks.length / Math.max(1, input.sections.length) > domain.days.length) {
       issues.push('P1 test assignments exceed the number of teaching days.')
     }
-    if (p1Tests.reserveEveryP1ForTest && testTasks.length !== genericTimetableDays.length * input.sections.length) {
+    if (p1Tests.reserveEveryP1ForTest && testTasks.length !== domain.days.length * input.sections.length) {
       issues.push('Reserving every P1 for a test requires exactly one configured test on each teaching day in every section.')
     }
     if (testTasks.length === 0 && selectedIds.length > 0) {
@@ -501,13 +543,13 @@ function validatePlacementException(input: GenericScheduleConfig, issues: string
   }
 }
 
-function slotIndex(dayIndex: number, period: number): number {
-  return dayIndex * genericPeriodsPerDay + period - 1
+function slotIndexForDomain(dayIndex: number, period: number, domain: SchedulerDomain): number {
+  return dayIndex * domain.periodsPerDay + period - 1
 }
 
-function crossesLunch(startPeriod: number, duration: number): boolean {
+function crossesLunch(startPeriod: number, duration: number, lunchAfterPeriod = 4): boolean {
   const endPeriod = startPeriod + duration - 1
-  return startPeriod <= 4 && endPeriod >= 5
+  return startPeriod <= lunchAfterPeriod && endPeriod > lunchAfterPeriod
 }
 
 function isNormalActivity(item: Pick<WorkItem, 'kind' | 'isPlacement'>): boolean {
@@ -520,19 +562,19 @@ function arrangementSignature(cells: Array<GenericCell | null>): string {
     : 'FREE').join('\u001e')
 }
 
-function sectionArrangementSignature(section: GenericGeneratedSection): string {
-  return arrangementSignature(genericTimetableDays.flatMap((day) => periods.map((period) => section.schedule[day]?.[period] ?? null)))
+function sectionArrangementSignature(section: GenericGeneratedSection, domain: SchedulerDomain = defaultDomain): string {
+  return arrangementSignature(domain.days.flatMap((day) => domain.periods.map((period) => section.schedule[day]?.[period] ?? null)))
 }
 
-function reservedTeacherSlots(sections: GenericGeneratedSection[], alternateWeek = false): Map<number, Set<string>> {
+function reservedTeacherSlots(sections: GenericGeneratedSection[], alternateWeek = false, domain: SchedulerDomain = defaultDomain): Map<number, Set<string>> {
   const occupied = new Map<number, Set<string>>()
   for (const section of sections) {
-    for (const [dayIndex, day] of genericTimetableDays.entries()) {
-      for (const period of periods) {
+    for (const [dayIndex, day] of domain.days.entries()) {
+      for (const period of domain.periods) {
         const cell = section.schedule[day]?.[period]
         const teacherId = alternateWeek ? cell?.alternateSubject?.teacherId ?? cell?.teacherId : cell?.teacherId
         if (teacherId) {
-          const slot = slotIndex(dayIndex, period)
+          const slot = slotIndexForDomain(dayIndex, period, domain)
           const teachers = occupied.get(slot) ?? new Set<string>()
           teachers.add(teacherId)
           occupied.set(slot, teachers)
@@ -543,12 +585,12 @@ function reservedTeacherSlots(sections: GenericGeneratedSection[], alternateWeek
   return occupied
 }
 
-function unavailableTeacherSlotMap(slots: GenericUnavailableTeacherSlot[]): Map<number, Set<string>> {
+function unavailableTeacherSlotMap(slots: GenericUnavailableTeacherSlot[], domain: SchedulerDomain = defaultDomain): Map<number, Set<string>> {
   const occupied = new Map<number, Set<string>>()
   for (const unavailable of slots) {
-    const dayIndex = genericTimetableDays.indexOf(unavailable.day)
-    if (dayIndex < 0 || !unavailable.teacherId) continue
-    const slot = slotIndex(dayIndex, unavailable.period)
+    const dayIndex = domain.days.indexOf(unavailable.day)
+    if (dayIndex < 0 || unavailable.period < 1 || unavailable.period > domain.periodsPerDay || !unavailable.teacherId) continue
+    const slot = slotIndexForDomain(dayIndex, unavailable.period, domain)
     const teachers = occupied.get(slot) ?? new Set<string>()
     teachers.add(unavailable.teacherId)
     occupied.set(slot, teachers)
@@ -562,8 +604,8 @@ function validateUnavailableTeacherSlots(slots: GenericUnavailableTeacherSlot[],
       issues.push(`${label} entry ${index + 1} has no teacher ID.`)
       continue
     }
-    if (!genericTimetableDays.includes(unavailable.day)) issues.push(`${label} entry ${index + 1} has an unsupported day.`)
-    if (!Number.isInteger(unavailable.period) || unavailable.period < 1 || unavailable.period > genericPeriodsPerDay) {
+    if (!(collegeWeekdays as readonly string[]).includes(unavailable.day)) issues.push(`${label} entry ${index + 1} has an unsupported day.`)
+    if (!Number.isInteger(unavailable.period) || unavailable.period < 1) {
       issues.push(`${label} entry ${index + 1} has an invalid period.`)
     }
   }
@@ -579,6 +621,7 @@ function buildSchedule(
   random: () => number = Math.random,
   requestedSearchLimit?: number,
   deterministicSearch = false,
+  domain: SchedulerDomain = defaultDomain,
 ): GenericTimetableGenerationResult {
   const normalizedSections = profiles.flatMap((profile) => profile.sections)
   for (const items of itemsBySection.values()) {
@@ -586,16 +629,16 @@ function buildSchedule(
   }
   const states = new Map<string, SectionState>(normalizedSections.map(({ key, section, profileKey, profile }) => [key, {
     section, profileKey, profile,
-    cells: Array<GenericCell | null>(genericStudentSlotsPerWeek).fill(null),
+    cells: Array<GenericCell | null>(domain.studentCapacity).fill(null),
   }]))
-  const fixedTeacherAtSlot = reservedTeacherSlots(reservedSections)
-  for (const [slot, unavailableTeachers] of unavailableTeacherSlotMap(unavailableTeacherSlots)) {
+  const fixedTeacherAtSlot = reservedTeacherSlots(reservedSections, false, domain)
+  for (const [slot, unavailableTeachers] of unavailableTeacherSlotMap(unavailableTeacherSlots, domain)) {
     const teachers = fixedTeacherAtSlot.get(slot) ?? new Set<string>()
     for (const teacher of unavailableTeachers) teachers.add(teacher)
     fixedTeacherAtSlot.set(slot, teachers)
   }
-  const fixedAlternateTeacherAtSlot = reservedTeacherSlots(reservedSections, true)
-  for (const [slot, unavailableTeachers] of unavailableTeacherSlotMap(alternateWeekUnavailableTeacherSlots)) {
+  const fixedAlternateTeacherAtSlot = reservedTeacherSlots(reservedSections, true, domain)
+  for (const [slot, unavailableTeachers] of unavailableTeacherSlotMap(alternateWeekUnavailableTeacherSlots, domain)) {
     const teachers = fixedAlternateTeacherAtSlot.get(slot) ?? new Set<string>()
     for (const teacher of unavailableTeachers) teachers.add(teacher)
     fixedAlternateTeacherAtSlot.set(slot, teachers)
@@ -604,9 +647,9 @@ function buildSchedule(
   const alternateTeacherAtSlot = new Map<number, Set<string>>()
   const placementAlternateClashes = new Set<string>()
   const describeOccupiedTeacher = (teacherId: string, index: number): string | undefined => {
-    const dayIndex = Math.floor(index / genericPeriodsPerDay)
-    const day = genericTimetableDays[dayIndex]
-    const period = index % genericPeriodsPerDay + 1
+    const dayIndex = Math.floor(index / domain.periodsPerDay)
+    const day = domain.days[dayIndex]
+    const period = index % domain.periodsPerDay + 1
     for (const section of reservedSections) {
       const cell = section.schedule[day]?.[period]
       if (cell && (cell.alternateSubject?.teacherId ?? cell.teacherId) === teacherId) {
@@ -625,7 +668,7 @@ function buildSchedule(
     }
     return saved ? 'a saved timetable' : undefined
   }
-  const labResourceAtSlot = Array.from({ length: genericStudentSlotsPerWeek }, () => new Map<string, string>())
+  const labResourceAtSlot = Array.from({ length: domain.studentCapacity }, () => new Map<string, string>())
   const labBlocksPerDay = new Map<string, number>()
   const labBlocksPerDefinitionDay = new Map<string, number>()
   const placementPeriodsPerDay = new Map<string, number>()
@@ -658,12 +701,12 @@ function buildSchedule(
     : Math.min(configuredSearchLimit, requestedSearchLimit ?? configuredSearchLimit)
   const ordered = <T>(values: T[]): T[] => deterministicSearch ? [...values] : shuffled(values, random)
 
-  const getDayCells = (item: WorkItem, dayIndex: number) => states.get(item.sectionId)!.cells.slice(dayIndex * 8, dayIndex * 8 + 8)
+  const getDayCells = (item: WorkItem, dayIndex: number) => states.get(item.sectionId)!.cells.slice(dayIndex * domain.periodsPerDay, (dayIndex + 1) * domain.periodsPerDay)
   const countItemOnDay = (item: WorkItem, dayIndex: number) => {
     const cells = states.get(item.sectionId)!.cells
-    const dayStart = dayIndex * 8
+    const dayStart = dayIndex * domain.periodsPerDay
     let count = 0
-    for (let index = dayStart; index < dayStart + 8; index += 1) {
+    for (let index = dayStart; index < dayStart + domain.periodsPerDay; index += 1) {
       if (cells[index]?.itemId === item.id) count += 1
     }
     return count
@@ -707,7 +750,7 @@ function buildSchedule(
   }
   const hasFixedTeacherConflict = (item: WorkItem, candidate: BlockCandidate, duration: number): boolean => {
     for (let offset = 0; offset < duration; offset += 1) {
-      const index = slotIndex(candidate.dayIndex, candidate.startPeriod + offset)
+      const index = slotIndexForDomain(candidate.dayIndex, candidate.startPeriod + offset, domain)
       if (fixedTeacherAtSlot.get(index)?.has(item.teacherId)) return true
       const alternateTeacherId = item.isPlacement && item.placementException
         ? alternateAssignment(alternateDefinition(item, offset + 1)!, inputSectionId(item.sectionId))?.teacherId
@@ -716,7 +759,7 @@ function buildSchedule(
       if (fixedAlternateTeacherAtSlot.get(index)?.has(alternateTeacherId)) {
         const occupiedBy = describeOccupiedTeacher(alternateTeacherId, index)
         if (occupiedBy) {
-          const day = genericTimetableDays[candidate.dayIndex]
+          const day = domain.days[candidate.dayIndex]
           const period = candidate.startPeriod + offset
           if (item.isPlacement && item.placementException) {
             const alternate = alternateDefinition(item, offset + 1)!
@@ -744,8 +787,8 @@ function buildSchedule(
   }
   const placementAlternateRulesAllow = (item: WorkItem, candidate: BlockCandidate, duration: number): boolean => {
     if (!item.placementException) return true
-    const dayStart = candidate.dayIndex * genericPeriodsPerDay
-    const dayCells = states.get(item.sectionId)!.cells.slice(dayStart, dayStart + genericPeriodsPerDay)
+    const dayStart = candidate.dayIndex * domain.periodsPerDay
+    const dayCells = states.get(item.sectionId)!.cells.slice(dayStart, dayStart + domain.periodsPerDay)
     const proposedByPeriod = new Map<number, WorkItem>()
     for (let placementPosition = 1; placementPosition <= duration; placementPosition += 1) {
       const alternate = alternateWorkItem(item, placementPosition)
@@ -778,8 +821,8 @@ function buildSchedule(
   const regularSubjectAlternateRulesAllow = (item: WorkItem, candidate: BlockCandidate, duration: number): boolean => {
     if (item.kind !== 'core' && item.kind !== 'other') return true
     if (!states.get(item.sectionId)?.profile.placementException?.enabled) return true
-    const dayStart = candidate.dayIndex * genericPeriodsPerDay
-    const dayCells = states.get(item.sectionId)!.cells.slice(dayStart, dayStart + genericPeriodsPerDay)
+    const dayStart = candidate.dayIndex * domain.periodsPerDay
+    const dayCells = states.get(item.sectionId)!.cells.slice(dayStart, dayStart + domain.periodsPerDay)
     const proposedPeriods = new Set(Array.from({ length: duration }, (_, index) => candidate.startPeriod + index))
     const projected = dayCells.map((cell, index) => proposedPeriods.has(index + 1) ? item : projectedAlternateItem(item.sectionId, cell))
     const count = projected.filter((projectedItem) => projectedItem?.id === item.id).length
@@ -801,7 +844,7 @@ function buildSchedule(
     const { item, duration } = task
     const { dayIndex, startPeriod } = candidate
     const endPeriod = startPeriod + duration - 1
-    if (startPeriod < 1 || endPeriod > genericPeriodsPerDay) return false
+    if (startPeriod < 1 || endPeriod > domain.periodsPerDay) return false
     if (task.isTest && startPeriod !== 1) return false
     if (!task.isTest && isNormalActivity(item) && startPeriod === 1) return false
     if (!task.isTest && item.isCore && item.rules.allowCoreSubjectsInP1 === false && startPeriod === 1) return false
@@ -811,7 +854,7 @@ function buildSchedule(
     if (item.allowedStartPeriods && !item.allowedStartPeriods.includes(startPeriod)) return false
     if (duration > 1
       && (item.isLab || item.isPlacement || item.rules.blocksAvoidLunch !== false)
-      && crossesLunch(startPeriod, duration)) return false
+      && crossesLunch(startPeriod, duration, domain.lunchAfterPeriod)) return false
 
     const sectionState = states.get(item.sectionId)!
     const dayKey = sectionDayKey(item, dayIndex)
@@ -820,12 +863,12 @@ function buildSchedule(
     if (isNormalActivity(item) && specialActivityAtDay.has(dayKey)) return false
     if (isNormalActivity(item) && item.rules.allowConsecutiveSpecialActivityDays === false
       && ((dayIndex > 0 && specialActivityAtDay.has(`${item.sectionId}:${dayIndex - 1}`))
-        || (dayIndex + 1 < genericTimetableDays.length && specialActivityAtDay.has(`${item.sectionId}:${dayIndex + 1}`)))) return false
+        || (dayIndex + 1 < domain.days.length && specialActivityAtDay.has(`${item.sectionId}:${dayIndex + 1}`)))) return false
     if (item.isPlacement && (placementPeriodsPerDay.get(dayKey) ?? 0) + duration >= 4
       && specialActivityAtDay.has(dayKey)) return false
     if (isNormalActivity(item) && (placementPeriodsPerDay.get(dayKey) ?? 0) >= 4) return false
     for (let period = startPeriod; period <= endPeriod; period += 1) {
-      const index = slotIndex(dayIndex, period)
+      const index = slotIndexForDomain(dayIndex, period, domain)
       if (sectionState.cells[index]) return false
       if (teacherAtSlot.get(index)?.has(item.teacherId)) return false
       if (item.isPlacement && item.placementException) {
@@ -836,14 +879,14 @@ function buildSchedule(
           const section = sectionState.section
           const teacherName = alternateAssignment(alternate, inputSectionId(item.sectionId))?.teacherNameSnapshot ?? alternateTeacherId
           const occupiedBy = describeOccupiedTeacher(alternateTeacherId, index) ?? 'another occupied timetable slot'
-          placementAlternateClashes.add(`${sectionState.profile.department} · ${sectionState.profile.year} · ${sectionState.profile.semester} · Section ${section.id} alternate subject ${alternate.subjectNameSnapshot} assigned to ${teacherName} (${alternateTeacherId}) conflicts at ${genericTimetableDays[dayIndex]} P${period} with ${occupiedBy}.`)
+          placementAlternateClashes.add(`${sectionState.profile.department} · ${sectionState.profile.year} · ${sectionState.profile.semester} · Section ${section.id} alternate subject ${alternate.subjectNameSnapshot} assigned to ${teacherName} (${alternateTeacherId}) conflicts at ${domain.days[dayIndex]} P${period} with ${occupiedBy}.`)
           return false
         }
       } else if (alternateTeacherAtSlot.get(index)?.has(item.teacherId)) {
         const occupiedBy = describeOccupiedTeacher(item.teacherId, index)
         if (occupiedBy) {
           const teacherName = states.get(item.sectionId)?.profile.staff.find((staff) => staff.id === item.teacherId)?.name ?? item.teacherId
-          placementAlternateClashes.add(`${sectionState.profile.department} · ${sectionState.profile.year} · ${sectionState.profile.semester} · Section ${sectionState.section.id} ${item.name} assigned to ${teacherName} (${item.teacherId}) conflicts at ${genericTimetableDays[dayIndex]} P${period} with ${occupiedBy}.`)
+          placementAlternateClashes.add(`${sectionState.profile.department} · ${sectionState.profile.year} · ${sectionState.profile.semester} · Section ${sectionState.section.id} ${item.name} assigned to ${teacherName} (${item.teacherId}) conflicts at ${domain.days[dayIndex]} P${period} with ${occupiedBy}.`)
         }
         return false
       }
@@ -864,11 +907,11 @@ function buildSchedule(
         : item.rules.subjectConsecutiveMaximum ?? 2
       const consecutiveLimit = Math.max(Math.min(configuredLimit, 2), item.blockDuration)
       const cells = sectionState.cells
-      const dayStart = dayIndex * genericPeriodsPerDay
+      const dayStart = dayIndex * domain.periodsPerDay
       const proposedStart = dayStart + startPeriod - 1
       const proposedEnd = dayStart + endPeriod - 1
       let run = 0
-      for (let index = dayStart; index < dayStart + genericPeriodsPerDay; index += 1) {
+      for (let index = dayStart; index < dayStart + domain.periodsPerDay; index += 1) {
         const isItem = index >= proposedStart && index <= proposedEnd
           || cells[index]?.itemId === item.id
         run = isItem ? run + 1 : 0
@@ -889,7 +932,7 @@ function buildSchedule(
   const put = (task: BlockTask, candidate: BlockCandidate): void => {
     const { item, duration, isTest } = task
     for (let period = candidate.startPeriod; period < candidate.startPeriod + duration; period += 1) {
-      const index = slotIndex(candidate.dayIndex, period)
+      const index = slotIndexForDomain(candidate.dayIndex, period, domain)
       states.get(item.sectionId)!.cells[index] = {
         itemId: item.id,
         ...(task.validateBlock ? { blockId: task.id } : {}),
@@ -929,7 +972,7 @@ function buildSchedule(
   const remove = (task: BlockTask, candidate: BlockCandidate): void => {
     const { item, duration } = task
     for (let period = candidate.startPeriod; period < candidate.startPeriod + duration; period += 1) {
-      const index = slotIndex(candidate.dayIndex, period)
+      const index = slotIndexForDomain(candidate.dayIndex, period, domain)
       states.get(item.sectionId)!.cells[index] = null
       const teachers = teacherAtSlot.get(index)
       teachers?.delete(item.teacherId)
@@ -972,12 +1015,13 @@ function buildSchedule(
     group.push(task)
     equivalentTaskGroups.set(key, group)
     const candidates = task.isTest
-      ? genericTimetableDays.map((_, dayIndex) => ({ dayIndex, startPeriod: 1 }))
-      : genericTimetableDays.flatMap((_, dayIndex) =>
+      ? domain.days.map((_, dayIndex) => ({ dayIndex, startPeriod: 1 }))
+      : domain.days.flatMap((_, dayIndex) =>
         validStartsForBlock(
         { ...task.item, isNormalActivity: isNormalActivity(task.item) },
         task.duration,
         task.item.rules,
+        domain,
         ).map((startPeriod) => ({ dayIndex, startPeriod })))
     taskCandidates.set(task.id, candidates.filter((candidate) =>
       !hasFixedTeacherConflict(task.item, candidate, task.duration)))
@@ -986,8 +1030,8 @@ function buildSchedule(
   for (const items of itemsBySection.values()) {
     for (const item of items) {
       if (item.schedulesAsBlocks || item.blockDuration !== 1) continue
-      const candidates = genericTimetableDays.flatMap((_, dayIndex) =>
-        periods.map((startPeriod) => ({ dayIndex, startPeriod })))
+      const candidates = domain.days.flatMap((_, dayIndex) =>
+        domain.periods.map((startPeriod) => ({ dayIndex, startPeriod })))
       singleCandidatesByItem.set(item, candidates.filter((candidate) =>
         !hasFixedTeacherConflict(item, candidate, 1)))
     }
@@ -1010,7 +1054,7 @@ function buildSchedule(
         requiredByTeacher.set(item.teacherId, (requiredByTeacher.get(item.teacherId) ?? 0) + item.remaining)
         const availableSlots = availableSlotsByTeacher.get(item.teacherId) ?? new Set<number>()
         for (const candidate of candidates) {
-          availableSlots.add(slotIndex(candidate.dayIndex, candidate.startPeriod))
+          availableSlots.add(slotIndexForDomain(candidate.dayIndex, candidate.startPeriod, domain))
         }
         availableSlotsByTeacher.set(item.teacherId, availableSlots)
       }
@@ -1031,10 +1075,10 @@ function buildSchedule(
     const previousPositions = previousEquivalentTasks.get(task.id)!
       .map((previous) => assignedCandidates.get(previous.id))
       .filter((candidate): candidate is BlockCandidate => candidate !== undefined)
-      .map((candidate) => candidate.dayIndex * genericPeriodsPerDay + candidate.startPeriod)
+      .map((candidate) => candidate.dayIndex * domain.periodsPerDay + candidate.startPeriod)
     const minimumPosition = previousPositions.length ? Math.max(...previousPositions) : -1
     return taskCandidates.get(task.id)!
-      .filter((candidate) => candidate.dayIndex * genericPeriodsPerDay + candidate.startPeriod > minimumPosition)
+      .filter((candidate) => candidate.dayIndex * domain.periodsPerDay + candidate.startPeriod > minimumPosition)
       .filter((candidate) => canPlace(task, candidate))
   }
 
@@ -1058,7 +1102,7 @@ function buildSchedule(
     const peersByTeacherSlot = new Map<string, Set<WorkItem>>()
     for (const [item, candidates] of candidatesByItem) {
       for (const candidate of candidates) {
-        const position = slotIndex(candidate.dayIndex, candidate.startPeriod)
+        const position = slotIndexForDomain(candidate.dayIndex, candidate.startPeriod, domain)
         const studentKey = `${item.sectionId}:${position}`
         const studentPeers = peersByStudentSlot.get(studentKey) ?? new Set<WorkItem>()
         studentPeers.add(item)
@@ -1070,7 +1114,7 @@ function buildSchedule(
       }
     }
     const peerCount = (item: WorkItem, candidate: BlockCandidate): number => {
-      const position = slotIndex(candidate.dayIndex, candidate.startPeriod)
+      const position = slotIndexForDomain(candidate.dayIndex, candidate.startPeriod, domain)
       const peers = new Set([
         ...(peersByStudentSlot.get(`${item.sectionId}:${position}`) ?? []),
         ...(peersByTeacherSlot.get(`${item.teacherId}:${position}`) ?? []),
@@ -1176,12 +1220,12 @@ function buildSchedule(
   }
 
   const generated: GenericGeneratedSection[] = normalizedSections.map(({ section, key, profileKey, profile }) => {
-    const schedule = Object.fromEntries(genericTimetableDays.map((day) => [day, {}])) as GenericGeneratedSection['schedule']
-    for (let dayIndex = 0; dayIndex < genericTimetableDays.length; dayIndex += 1) {
-      const day = genericTimetableDays[dayIndex] as GenericWeekDay
-      for (const period of periods) {
-        const cell = states.get(key)!.cells[slotIndex(dayIndex, period)]!
-        schedule[day][period] = cell
+    const schedule = Object.fromEntries(domain.days.map((day) => [day, {}])) as GenericGeneratedSection['schedule']
+    for (let dayIndex = 0; dayIndex < domain.days.length; dayIndex += 1) {
+      const day = domain.days[dayIndex] as GenericWeekDay
+      for (const period of domain.periods) {
+        const cell = states.get(key)!.cells[slotIndexForDomain(dayIndex, period, domain)]!
+        schedule[day]![period] = cell
       }
     }
     return {
@@ -1197,7 +1241,7 @@ function buildSchedule(
 
   const validation = validateGenericGenerated(
     normalizedSections, generated, itemsBySection, testTasks, reservedSections,
-    unavailableTeacherSlots, alternateWeekUnavailableTeacherSlots,
+    unavailableTeacherSlots, alternateWeekUnavailableTeacherSlots, false, domain,
   )
   if (validation.issues.length) return failure(validation.issues, 'UNSATISFIABLE')
   return { ok: true, sections: generated, searchNodes, validation: validation.summary }
@@ -1207,8 +1251,9 @@ function areSectionArrangementsUniqueWithReserved(
   sections: NormalizedSection[],
   states: Map<string, SectionState>,
   reservedSections: GenericGeneratedSection[],
+  domain: SchedulerDomain = defaultDomain,
 ): boolean {
-  const signatures = new Set(reservedSections.map(sectionArrangementSignature))
+  const signatures = new Set(reservedSections.map((section) => sectionArrangementSignature(section, domain)))
   for (const { key } of sections) {
     const signature = arrangementSignature(states.get(key)!.cells)
     if (signatures.has(signature)) return false
@@ -1226,16 +1271,17 @@ function validateGenericGenerated(
   unavailableTeacherSlots: GenericUnavailableTeacherSlot[] = [],
   alternateWeekUnavailableTeacherSlots: GenericUnavailableTeacherSlot[] = [],
   editMode = false,
+  domain: SchedulerDomain = defaultDomain,
 ): { summary: GenericTimetableValidationSummary; issues: string[] } {
   const issues: string[] = []
   let globalTeacherClashes = 0
   const sectionSummaries: GenericTimetableValidationSummary['sections'] = []
   const teacherSlots = new Map<string, Map<string, Set<string>>>()
   const alternateTeacherSlots = new Map<string, Map<string, Set<string>>>()
-  const reservedSlots = reservedTeacherSlots(reservedSections)
-  const reservedAlternateSlots = reservedTeacherSlots(reservedSections, true)
-  const savedSlots = unavailableTeacherSlotMap(unavailableTeacherSlots)
-  const savedAlternateSlots = unavailableTeacherSlotMap(alternateWeekUnavailableTeacherSlots)
+  const reservedSlots = reservedTeacherSlots(reservedSections, false, domain)
+  const reservedAlternateSlots = reservedTeacherSlots(reservedSections, true, domain)
+  const savedSlots = unavailableTeacherSlotMap(unavailableTeacherSlots, domain)
+  const savedAlternateSlots = unavailableTeacherSlotMap(alternateWeekUnavailableTeacherSlots, domain)
   const workItems = new Map([...itemsBySection.values()].flat().map((item) => [item.id, item]))
   const blockEntries = new Map<string, Array<{ item: WorkItem; dayIndex: number; period: number; cell: GenericScheduledCell }>>()
   for (const normalizedSection of sectionsToCheck) {
@@ -1257,8 +1303,8 @@ function validateGenericGenerated(
       sectionSummaries.push({ sectionId: section.id, profileId: profileKey, department: profile.department, periodsFilled, coreHoursValid: false, otherSubjectHoursValid: false, labAllocationValid: false })
       continue
     }
-    for (let dayIndex = 0; dayIndex < genericTimetableDays.length; dayIndex += 1) {
-      const day = genericTimetableDays[dayIndex]
+    for (let dayIndex = 0; dayIndex < domain.days.length; dayIndex += 1) {
+      const day = domain.days[dayIndex]
       const normalActivityBlocks = new Set<string>()
       const dayItems: Array<{ item: WorkItem | undefined; cell: GenericScheduledCell; period: number }> = []
       const dayItemCounts = new Map<string, number>()
@@ -1266,7 +1312,7 @@ function validateGenericGenerated(
       const dayLabBlocksByItem = new Map<string, Set<string>>()
       let placementPeriods = 0
       let hasLab = false
-      for (const period of periods) {
+      for (const period of domain.periods) {
         const cell = result.schedule[day]?.[period]
         if (!cell?.teacherId || !cell.abbreviation.trim()) {
           issues.push(`${profile.department} Section ${section.id} ${day} P${period} is empty or unassigned.`)
@@ -1335,11 +1381,11 @@ function validateGenericGenerated(
           blockEntries.set(cell.blockId, entries)
         }
         const slotKey = `${day}:P${period}`
-        if (reservedSlots.get(slotIndex(dayIndex, period))?.has(cell.teacherId)) {
+        if (reservedSlots.get(slotIndexForDomain(dayIndex, period, domain))?.has(cell.teacherId)) {
           globalTeacherClashes += 1
           issues.push(`${cell.teacherId} has a teacher clash at ${slotKey} with a previously generated active timetable.`)
         }
-        const savedSlot = slotIndex(dayIndex, period)
+        const savedSlot = slotIndexForDomain(dayIndex, period, domain)
         if (savedSlots.get(savedSlot)?.has(cell.teacherId)) {
           globalTeacherClashes += 1
           const existing = unavailableTeacherSlots.find((entry) => entry.teacherId === cell.teacherId && entry.day === day && entry.period === period)?.existing
@@ -1351,7 +1397,7 @@ function validateGenericGenerated(
         teachers.set(cell.teacherId, sections)
         teacherSlots.set(slotKey, teachers)
         const alternateTeacherId = cell.alternateSubject?.teacherId ?? cell.teacherId
-        if (reservedAlternateSlots.get(slotIndex(dayIndex, period))?.has(alternateTeacherId)) {
+        if (reservedAlternateSlots.get(slotIndexForDomain(dayIndex, period, domain))?.has(alternateTeacherId)) {
           globalTeacherClashes += 1
           issues.push(`${alternateTeacherId} has an alternate-week teacher clash at ${slotKey} with a previously generated active timetable.`)
         }
@@ -1434,13 +1480,13 @@ function validateGenericGenerated(
       }
     }
     if (profile.rules?.allowConsecutiveSpecialActivityDays === false) {
-      for (let dayIndex = 1; dayIndex < genericTimetableDays.length; dayIndex += 1) {
+      for (let dayIndex = 1; dayIndex < domain.days.length; dayIndex += 1) {
         if (normalActivityDays.has(dayIndex - 1) && normalActivityDays.has(dayIndex)) {
           issues.push(`${profile.department} Section ${section.id} has normal Special Activities on consecutive days.`)
         }
       }
     }
-    if (periodsFilled !== genericStudentSlotsPerWeek) issues.push(`${profile.department} Section ${section.id} has ${periodsFilled}/${genericStudentSlotsPerWeek} occupied student periods.`)
+    if (periodsFilled !== domain.studentCapacity) issues.push(`${profile.department} Section ${section.id} has ${periodsFilled}/${domain.studentCapacity} occupied student periods.`)
 
     for (const item of itemsBySection.get(key) ?? []) {
       if (!editMode && (counts.get(item.id) ?? 0) !== item.weeklyPeriods) {
@@ -1459,7 +1505,7 @@ function validateGenericGenerated(
       }
     }
     if (profile.rules?.p1Tests?.enabled && profile.rules.p1Tests.reserveEveryP1ForTest) {
-      for (const day of genericTimetableDays) {
+      for (const day of domain.days) {
         if (!result.schedule[day]?.[1]?.isCoreTest) issues.push(`${profile.department} Section ${section.id} ${day} P1 must be reserved for a configured Core Test.`)
       }
     }
@@ -1519,10 +1565,11 @@ function validateGenericGenerated(
         }
       }
     }
-    if (!validStartsForBlock({ ...item, isNormalActivity: isNormalActivity(item) }, entries.length, item.rules).includes(startPeriod)) {
+    if (!validStartsForBlock({ ...item, isNormalActivity: isNormalActivity(item) }, entries.length, item.rules, domain).includes(startPeriod)) {
       issues.push(`${item.name} starts at disallowed period P${startPeriod}.`)
     }
-    if ((item.isLab || item.isPlacement || item.rules.blocksAvoidLunch !== false) && crossesLunch(startPeriod, entries.length)) {
+    if ((item.isLab || item.isPlacement || item.rules.blocksAvoidLunch !== false)
+      && crossesLunch(startPeriod, entries.length, domain.lunchAfterPeriod)) {
       issues.push(`${item.name} crosses lunch.`)
     }
   }
@@ -1540,7 +1587,10 @@ function validateGenericGenerated(
     }
   }
 
-  const signatures = [...reservedSections.map(sectionArrangementSignature), ...generated.map(sectionArrangementSignature)]
+  const signatures = [
+    ...reservedSections.map((section) => sectionArrangementSignature(section, domain)),
+    ...generated.map((section) => sectionArrangementSignature(section, domain)),
+  ]
   if (new Set(signatures).size !== signatures.length) issues.push('Two sections have identical complete timetable arrangements.')
   return { summary: { sections: sectionSummaries, globalTeacherClashes }, issues: [...new Set(issues)] }
 }
@@ -1553,7 +1603,8 @@ export function validateGenericScheduleEdit(
   unavailableTeacherSlots: GenericUnavailableTeacherSlot[] = [],
   alternateWeekUnavailableTeacherSlots: GenericUnavailableTeacherSlot[] = [],
 ): { summary: GenericTimetableValidationSummary; issues: string[] } {
-  const profile = validateProfile(input, profileIdentity(input), false)
+  const domain = schedulerDomain(input.collegeTimings)
+  const profile = validateProfile(input, profileIdentity(input), false, domain)
   const issues = profile.issues.filter((issue) => !issue.startsWith('Configured workload is '))
   if (issues.length) {
     return {
@@ -1581,19 +1632,20 @@ export function validateGenericScheduleEdit(
     unavailableTeacherSlots,
     alternateWeekUnavailableTeacherSlots,
     true,
+    domain,
   )
 }
 
-function scheduleArrangementScore(sections: NormalizedSection[], states: Map<string, SectionState>, itemsBySection: Map<string, WorkItem[]>): number {
+function scheduleArrangementScore(sections: NormalizedSection[], states: Map<string, SectionState>, itemsBySection: Map<string, WorkItem[]>, domain: SchedulerDomain = defaultDomain): number {
   let score = 0
   for (const { key } of sections) {
     const itemById = new Map((itemsBySection.get(key) ?? []).map((item) => [item.id, item]))
     const daySignatures = new Set<string>()
     const placementStarts = new Map<string, number[]>()
     const dailySubjectOccurrences = new Map<string, number[]>()
-    const labsByDay: Set<string>[] = Array.from({ length: genericTimetableDays.length }, () => new Set<string>())
-    for (let dayIndex = 0; dayIndex < genericTimetableDays.length; dayIndex += 1) {
-      const dayCells = states.get(key)!.cells.slice(dayIndex * genericPeriodsPerDay, (dayIndex + 1) * genericPeriodsPerDay)
+    const labsByDay: Set<string>[] = Array.from({ length: domain.days.length }, () => new Set<string>())
+    for (let dayIndex = 0; dayIndex < domain.days.length; dayIndex += 1) {
+      const dayCells = states.get(key)!.cells.slice(dayIndex * domain.periodsPerDay, (dayIndex + 1) * domain.periodsPerDay)
       const signature = arrangementSignature(dayCells)
       if (daySignatures.has(signature)) score += 25
       daySignatures.add(signature)
@@ -1609,7 +1661,7 @@ function scheduleArrangementScore(sections: NormalizedSection[], states: Map<str
       }
       for (const [itemId, count] of occurrences) {
         score += count * count
-        const dailyCounts = dailySubjectOccurrences.get(itemId) ?? Array<number>(genericTimetableDays.length).fill(0)
+        const dailyCounts = dailySubjectOccurrences.get(itemId) ?? Array<number>(domain.days.length).fill(0)
         dailyCounts[dayIndex] = count
         dailySubjectOccurrences.set(itemId, dailyCounts)
       }
@@ -1625,9 +1677,9 @@ function scheduleArrangementScore(sections: NormalizedSection[], states: Map<str
     for (const [itemId, dailyCounts] of dailySubjectOccurrences) {
       const item = itemById.get(itemId)!
       let cumulative = 0
-      for (let dayIndex = 0; dayIndex < genericTimetableDays.length - 1; dayIndex += 1) {
+      for (let dayIndex = 0; dayIndex < domain.days.length - 1; dayIndex += 1) {
         cumulative += dailyCounts[dayIndex]
-        const expected = item.weeklyPeriods * (dayIndex + 1) / genericTimetableDays.length
+        const expected = item.weeklyPeriods * (dayIndex + 1) / domain.days.length
         score += Math.abs(cumulative - expected)
       }
     }
@@ -1646,7 +1698,7 @@ function profileIdentity(profile: GenericScheduleConfig): string {
 /** Validate readiness without searching for a timetable candidate. */
 export function validateGenericScheduleConfig(input: GenericScheduleConfig): string[] {
   const profileKey = profileIdentity(input)
-  const validation = validateProfile(input, profileKey, false)
+  const validation = validateProfile(input, profileKey, false, schedulerDomain(input.collegeTimings))
   if (input.candidateCount !== undefined && (!Number.isInteger(input.candidateCount) || input.candidateCount < 2)) {
     validation.issues.push('At least two randomized candidates are required.')
   } else if (input.candidateCount !== undefined && input.candidateCount > maximumCandidateCount) {
@@ -1666,6 +1718,8 @@ export function generateGenericTimetable(input: GenericSchedulerInput): GenericT
     ? input.candidateCount ?? 5
     : input.candidateCount ?? 5
   const rootSeed = isGroupInput(input) ? input.randomSeed : input.randomSeed
+  const domain = schedulerDomain(profilesInput[0].collegeTimings)
+  const expectedCollegeTimings = profilesInput.length > 1 ? JSON.stringify(profilesInput[0].collegeTimings ?? null) : null
   const profileSeeds = [...new Set(profilesInput.map((profile) => profile.randomSeed).filter((seed): seed is number => seed !== undefined))]
   const randomSeed = rootSeed ?? profileSeeds[0]
   if (!Number.isInteger(candidateCount) || candidateCount < 2) return failure(['At least two randomized candidates are required.'])
@@ -1688,7 +1742,10 @@ export function generateGenericTimetable(input: GenericSchedulerInput): GenericT
       if (knownName && knownName !== staff.name) issues.push(`Staff ID ${staff.id} maps to different names across configurations.`)
       else globalStaff.set(staff.id, staff.name)
     }
-    normalizedProfiles.push(validateProfile(profile, profileKey, grouped))
+    if (expectedCollegeTimings !== null && JSON.stringify(profile.collegeTimings ?? null) !== expectedCollegeTimings) {
+      issues.push(`Schedule configuration ${profileKey} uses different College Timings from the other configurations in this generation.`)
+    }
+    normalizedProfiles.push(validateProfile(profile, profileKey, grouped, domain))
   })
   for (const profile of normalizedProfiles) {
     issues.push(...profile.issues.map((issue) => `${profile.profile.department} (${profile.profileKey}): ${issue}`))
@@ -1713,6 +1770,7 @@ export function generateGenericTimetable(input: GenericSchedulerInput): GenericT
     const generated = buildSchedule(
       normalizedProfiles, itemsBySection, testTasks, reservedSections,
       unavailableTeacherSlots, alternateWeekUnavailableTeacherSlots, random, searchLimit, deterministicSearch,
+      domain,
     )
     if (!generated.ok) {
       lastFailure = generated
@@ -1726,10 +1784,10 @@ export function generateGenericTimetable(input: GenericSchedulerInput): GenericT
         section: normalizedSection.section,
         profileKey: normalizedSection.profileKey,
         profile: normalizedSection.profile,
-        cells: genericTimetableDays.flatMap((day) => periods.map((period) => section.schedule[day][period] ?? null)),
+        cells: domain.days.flatMap((day) => domain.periods.map((period) => section.schedule[day]?.[period] ?? null)),
       })
     })
-    const score = scheduleArrangementScore(allSections, statesForScore, itemsBySection)
+    const score = scheduleArrangementScore(allSections, statesForScore, itemsBySection, domain)
     if (score < bestScore) { best = generated; bestScore = score }
   }
   for (let candidate = 0; candidate < candidateCount; candidate += 1) {

@@ -1,12 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { runGenericTimetableGeneration } from './generic-scheduler-worker-pool.mjs'
 import { randomizeGenericPlacementAlternates } from '../src/generic-schedule-adapter.ts'
+import { validateCollegeTimings } from '../src/college-timings.ts'
 
 const maximumBodyBytes = 2 * 1024 * 1024
 const defaultMaximumRetainedGenerationJobs = 1024
 const defaultGenerationJobRetentionMs = 10 * 60 * 1000
-const supportedDays = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
-const maximumTeacherWeeklyPeriods = 48
+const supportedDays = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
 const randomPlacementAllocationAttempts = 8
 const setupArrayFields = [
   'staff', 'sections', 'coreSubjects', 'otherSubjectMaster', 'otherSubjects', 'labMaster',
@@ -181,7 +181,7 @@ function mergeWorkloadTotals(target, source) {
   }
 }
 
-function teacherWorkloadViolations(totals, teacherNames) {
+function teacherWorkloadViolations(totals, teacherNames, maximumTeacherWeeklyPeriods) {
   const teacherIds = new Set([...totals.normal.keys(), ...totals.alternate.keys()])
   return [...teacherIds].flatMap((teacherId) => {
     const normalPeriods = totals.normal.get(teacherId) ?? 0
@@ -201,8 +201,8 @@ function teacherWorkloadViolations(totals, teacherNames) {
 }
 
 function teacherWorkloadErrorMessage(violations) {
-  const details = violations.map(({ teacherName, assignedPeriods, exceededAmount }) =>
-    `${teacherName} is assigned ${assignedPeriods} periods, exceeding the weekly limit of ${maximumTeacherWeeklyPeriods} by ${exceededAmount} period${exceededAmount === 1 ? '' : 's'}.`)
+  const details = violations.map(({ teacherName, assignedPeriods, maximum, exceededAmount }) =>
+    `${teacherName} is assigned ${assignedPeriods} periods, exceeding the weekly limit of ${maximum} by ${exceededAmount} period${exceededAmount === 1 ? '' : 's'}.`)
   return `Teacher Workload Limit Exceeded:\n${details.join('\n')}\nReduce the teacher's assigned workload before generating.`
 }
 
@@ -210,7 +210,7 @@ function activeSectionWorkloadKey(section) {
   return timetableSectionKey(section, section.sectionId)
 }
 
-function preflightTeacherWorkload({ configuration, reservedSections, activeSections, knownTeachers, randomPlacementAllocations }) {
+function preflightTeacherWorkload({ configuration, reservedSections, activeSections, knownTeachers, randomPlacementAllocations, maximumTeacherWeeklyPeriods }) {
   const identity = {
     department: configuration.department,
     year: configuration.year,
@@ -269,7 +269,7 @@ function preflightTeacherWorkload({ configuration, reservedSections, activeSecti
     const candidateTotals = configuredTeacherWorkload(candidate)
     mergeWorkloadTotals(totals.normal, candidateTotals.normal)
     mergeWorkloadTotals(totals.alternate, candidateTotals.alternate)
-    const violations = teacherWorkloadViolations(totals, teacherNames)
+    const violations = teacherWorkloadViolations(totals, teacherNames, maximumTeacherWeeklyPeriods)
     if (!violations.length) {
       validCandidates.push(candidate)
       continue
@@ -456,6 +456,14 @@ export function createTimetableApiMiddleware(repository, {
           sendJson(response, 400, { error: 'A scheduler configuration and reserved sections are required.' })
           return
         }
+        if (configuration.collegeTimings !== undefined) {
+          const timingIssues = validateCollegeTimings(configuration.collegeTimings)
+          if (timingIssues.length) {
+            sendJson(response, 400, { error: 'College Timings configuration is invalid.', code: 'INVALID_INPUT', blockingConstraints: timingIssues })
+            return
+          }
+        }
+        const maximumTeacherWeeklyPeriods = configuration.collegeTimings?.teacherMaximumWeeklyPeriods ?? 48
         const identity = generationIdentity(configuration)
         const occupancyStaff = generationStaff(configuration)
         const fingerprint = generationFingerprint({ configuration, reservedSections })
@@ -495,6 +503,7 @@ export function createTimetableApiMiddleware(repository, {
           activeSections,
           knownTeachers,
           randomPlacementAllocations,
+          maximumTeacherWeeklyPeriods,
         })
         if (!workload.validCandidates.length) {
           logGenerationEvent('TEACHER_WORKLOAD_LIMIT_REJECTED', {
@@ -691,6 +700,16 @@ export function createTimetableApiMiddleware(repository, {
           sendJson(response, 400, { error: 'A generated timetable, configuration snapshot and generation ID are required.' })
           return
         }
+        if (configuration.collegeTimings !== undefined) {
+          const timingIssues = validateCollegeTimings(configuration.collegeTimings)
+          if (timingIssues.length) {
+            sendJson(response, 400, { error: 'College Timings configuration is invalid.', code: 'INVALID_INPUT', blockingConstraints: timingIssues })
+            return
+          }
+        }
+        const configuredDays = configuration.collegeTimings?.workingWeekdays ?? supportedDays.slice(0, 6)
+        const configuredPeriodsPerDay = configuration.collegeTimings?.periodsPerDay ?? 8
+        const configuredCapacity = configuredDays.length * configuredPeriodsPerDay
         const identityFields = ['department', 'year', 'semester', 'academicYear']
         if (identityFields.some((field) => !String(configuration[field] ?? '').trim())) {
           sendJson(response, 400, { error: 'Department, year, semester and academic year are required for a saved timetable.' })
@@ -705,6 +724,11 @@ export function createTimetableApiMiddleware(repository, {
         }
         if (!setupSnapshot.academic || identityFields.some((field) => setupSnapshot.academic[field] !== identity[field])) {
           sendJson(response, 400, { error: 'The saved setup snapshot must match the timetable department, year, semester and academic year.' })
+          return
+        }
+        if (JSON.stringify(canonicalizeGenerationInput(setupSnapshot.collegeTimings ?? null))
+          !== JSON.stringify(canonicalizeGenerationInput(configuration.collegeTimings ?? null))) {
+          sendJson(response, 400, { error: 'The saved College Timings snapshot must match the generated timetable domain.' })
           return
         }
         if (setupArrayFields.some((field) => !Array.isArray(setupSnapshot[field]))) {
@@ -746,16 +770,16 @@ export function createTimetableApiMiddleware(repository, {
             }
           }
           const schedule = section.schedule
-          if (!schedule || typeof schedule !== 'object' || Object.keys(schedule).length !== supportedDays.length
-            || supportedDays.some((day) => !Object.hasOwn(schedule, day))) {
-            sendJson(response, 400, { error: `Section ${section.sectionId} must include all six timetable days.` })
+          if (!schedule || typeof schedule !== 'object' || Object.keys(schedule).length !== configuredDays.length
+            || configuredDays.some((day) => !Object.hasOwn(schedule, day))) {
+            sendJson(response, 400, { error: `Section ${section.sectionId} must include all configured timetable days.` })
             return
           }
-          for (const day of supportedDays) {
+          for (const day of configuredDays) {
             const dayCells = schedule[day]
-            if (!dayCells || typeof dayCells !== 'object' || Object.keys(dayCells).length !== 8
-              || Array.from({ length: 8 }, (_, index) => String(index + 1)).some((period) => !Object.hasOwn(dayCells, period))) {
-              sendJson(response, 400, { error: `Section ${section.sectionId} ${day} must include periods 1 through 8 exactly once.` })
+            if (!dayCells || typeof dayCells !== 'object' || Object.keys(dayCells).length !== configuredPeriodsPerDay
+              || Array.from({ length: configuredPeriodsPerDay }, (_, index) => String(index + 1)).some((period) => !Object.hasOwn(dayCells, period))) {
+              sendJson(response, 400, { error: `Section ${section.sectionId} ${day} must include periods 1 through ${configuredPeriodsPerDay} exactly once.` })
               return
             }
             for (const [period, cell] of Object.entries(dayCells)) {
@@ -768,8 +792,8 @@ export function createTimetableApiMiddleware(repository, {
               }
             }
           }
-          if (Object.values(schedule).reduce((count, day) => count + Object.keys(day).length, 0) !== 48) {
-            sendJson(response, 400, { error: `Section ${section.sectionId} must contain exactly 48 occupied student periods before saving.` })
+          if (Object.values(schedule).reduce((count, day) => count + Object.keys(day).length, 0) !== configuredCapacity) {
+            sendJson(response, 400, { error: `Section ${section.sectionId} must contain exactly ${configuredCapacity} occupied student periods before saving.` })
             return
           }
         }

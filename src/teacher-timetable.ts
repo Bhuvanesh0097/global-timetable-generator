@@ -1,5 +1,7 @@
-import type { SectionName, StaffMember, WeekDay } from './models'
-import type { GeneratedSection, ScheduledCell } from './scheduler'
+import type { SectionName, StaffMember } from './models'
+import type { GenericGeneratedSection, GenericScheduledCell, GenericWeekDay } from './generic-scheduling-model.ts'
+import type { CollegeWeekday } from './college-timings.ts'
+import type { WeekDay } from './models'
 
 export const teacherTimetableDays: WeekDay[] = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
 export const teacherTimetablePeriods = Array.from({ length: 8 }, (_, index) => index + 1)
@@ -19,46 +21,33 @@ export const teacherTimetableColumns = [
 
 export interface TeacherTimetableEntry {
   sectionId: SectionName
-  cell: ScheduledCell
+  cell: GenericScheduledCell
   alternateWeek?: boolean
 }
 
-export type TeacherTimetable = Record<WeekDay, Record<number, TeacherTimetableEntry[]>>
+export type TeacherTimetable = Partial<Record<CollegeWeekday, Record<number, TeacherTimetableEntry[]>>>
 
 export interface TeacherTimetableTeacher {
   id: string
   name: string
 }
 
-interface AlternateSubjectCell extends ScheduledCell {
-  alternateSubject?: {
-    subjectId: string
-    subjectKind: 'core' | 'other'
-    code: string
-    abbreviation: string
-    name: string
-    teacherId: string
-    teacherNameSnapshot?: string
-  }
-}
-
 export interface TeacherTimetableClash {
   teacherId: string
-  day: WeekDay
+  day: CollegeWeekday
   period: number
   entries: TeacherTimetableEntry[]
 }
 
 /** Return only stable teacher identities represented by occupied timetable cells. */
 export function getTeachersUsedInTimetable(
-  generatedSections: GeneratedSection[],
+  generatedSections: GenericGeneratedSection[],
   staff: StaffMember[],
 ): TeacherTimetableTeacher[] {
   const usedTeacherNames = new Map<string, string>()
   for (const section of generatedSections) {
-    for (const day of teacherTimetableDays) {
-      for (const period of teacherTimetablePeriods) {
-        const cell = section.schedule[day]?.[period] as AlternateSubjectCell | undefined
+    for (const dayCells of Object.values(section.schedule)) {
+      for (const cell of Object.values(dayCells ?? {})) {
         if (cell?.teacherId) usedTeacherNames.set(cell.teacherId, usedTeacherNames.get(cell.teacherId) ?? '')
         const alternate = cell?.alternateSubject
         if (alternate?.teacherId) {
@@ -91,13 +80,14 @@ export function getTeachersUsedInTimetable(
 }
 
 /** Safety check for a staff member assigned to multiple generated sections at once. */
-export function findTeacherTimetableClashes(generatedSections: GeneratedSection[]): TeacherTimetableClash[] {
+export function findTeacherTimetableClashes(generatedSections: GenericGeneratedSection[]): TeacherTimetableClash[] {
   const assignments = new Map<string, TeacherTimetableClash>()
   for (const section of generatedSections) {
-    for (const day of teacherTimetableDays) {
-      for (const period of teacherTimetablePeriods) {
-        const cell = section.schedule[day]?.[period]
+    for (const [dayValue, dayCells] of Object.entries(section.schedule)) {
+      const day = dayValue as CollegeWeekday
+      for (const [periodValue, cell] of Object.entries(dayCells ?? {})) {
         if (!cell?.teacherId) continue
+        const period = Number(periodValue)
         const key = `${cell.teacherId}\u0000${day}\u0000${period}`
         const clash = assignments.get(key) ?? { teacherId: cell.teacherId, day, period, entries: [] }
         clash.entries.push({ sectionId: section.sectionId, cell })
@@ -109,20 +99,28 @@ export function findTeacherTimetableClashes(generatedSections: GeneratedSection[
 }
 
 /** Build a read-only view from generated cells, preserving only actual teacher assignments. */
-export function buildTeacherTimetable(generatedSections: GeneratedSection[], teacherId: string): TeacherTimetable {
-  const timetable = Object.fromEntries(teacherTimetableDays.map((day) => [
+export function buildTeacherTimetable(
+  generatedSections: GenericGeneratedSection[],
+  teacherId: string,
+  days: readonly GenericWeekDay[] = teacherTimetableDays,
+  periods: readonly number[] = teacherTimetablePeriods,
+): TeacherTimetable {
+  const timetable = Object.fromEntries(days.map((day) => [
     day,
-    Object.fromEntries(teacherTimetablePeriods.map((period) => [period, [] as TeacherTimetableEntry[]])),
+    Object.fromEntries(periods.map((period) => [period, [] as TeacherTimetableEntry[]])),
   ])) as TeacherTimetable
 
   for (const section of generatedSections) {
-    for (const day of teacherTimetableDays) {
-      for (const period of teacherTimetablePeriods) {
-        const cell = section.schedule[day]?.[period] as AlternateSubjectCell | undefined
-        if (cell?.teacherId === teacherId) timetable[day][period].push({ sectionId: section.sectionId, cell })
+    for (const [dayValue, dayCells] of Object.entries(section.schedule)) {
+      const day = dayValue as CollegeWeekday
+      if (!timetable[day]) continue
+      for (const [periodValue, cell] of Object.entries(dayCells ?? {})) {
+        const period = Number(periodValue)
+        if (!timetable[day]?.[period]) continue
+        if (cell?.teacherId === teacherId) timetable[day]![period]!.push({ sectionId: section.sectionId, cell })
         const alternate = cell?.alternateSubject
         if (alternate?.teacherId === teacherId) {
-          timetable[day][period].push({
+          timetable[day]![period]!.push({
             sectionId: section.sectionId,
             alternateWeek: true,
             cell: {

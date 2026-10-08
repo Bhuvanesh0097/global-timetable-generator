@@ -7,9 +7,11 @@ const migrations = [
   { version: 1, name: 'initial_schema', url: new URL('./migrations/001_initial_schema.sql', import.meta.url) },
   { version: 2, name: 'saved_version_snapshots', url: new URL('./migrations/002_saved_version_snapshots.sql', import.meta.url) },
   { version: 3, name: 'locked_version_guards', url: new URL('./migrations/003_locked_version_guards.sql', import.meta.url) },
+  { version: 4, name: 'configurable_timetable_domain', url: new URL('./migrations/004_configurable_timetable_domain.sql', import.meta.url) },
 ]
 const validStatuses = new Set(['DRAFT', 'SAVED', 'LOCKED'])
-const supportedDays = new Set(['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'])
+const supportedDays = new Set(['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'])
+const defaultTimetableDays = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
 const migrationLockId = 716_204_817
 const saveLockId = 716_204_818
 types.setTypeParser(20, (value) => Number(value))
@@ -20,6 +22,16 @@ function normalizedTeacherName(name) {
 
 function serialize(value, fallback = '{}') {
   return JSON.stringify(value ?? {}) ?? fallback
+}
+
+function timetableDomain(setupSnapshot = {}) {
+  const timings = setupSnapshot?.collegeTimings
+  const days = Array.isArray(timings?.workingWeekdays) && timings.workingWeekdays.length
+    && timings.workingWeekdays.every((day) => supportedDays.has(day))
+    ? timings.workingWeekdays : defaultTimetableDays
+  const periodsPerDay = Number.isSafeInteger(timings?.periodsPerDay) && timings.periodsPerDay > 0
+    ? timings.periodsPerDay : 8
+  return { days, periodsPerDay, capacity: days.length * periodsPerDay }
 }
 
 function withTransaction(database, work) {
@@ -481,11 +493,11 @@ export class TimetableRepository {
         configurations.academic_year, sections.section_name, versions.id,
         CASE cells.day
           WHEN 'Monday' THEN 1 WHEN 'Tuesday' THEN 2 WHEN 'Wednesday' THEN 3
-          WHEN 'Thursday' THEN 4 WHEN 'Friday' THEN 5 WHEN 'Saturday' THEN 6 END,
+          WHEN 'Thursday' THEN 4 WHEN 'Friday' THEN 5 WHEN 'Saturday' THEN 6 WHEN 'Sunday' THEN 7 END,
         cells.period
     `).all()
 
-    const days = Object.fromEntries([...supportedDays].map((day) => [day, {}]))
+    const days = Object.fromEntries(defaultTimetableDays.map((day) => [day, {}]))
     const activeVersions = new Map()
     for (const row of activeVersionCells) {
       let activeVersion = activeVersions.get(row.version_id)
@@ -530,7 +542,7 @@ export class TimetableRepository {
           if (cell.alternateSubject?.teacherId === requestedTeacherId) assignments.push({ week: 'alternate' })
 
           for (const assignment of assignments) {
-            const slot = days[day][period] ??= { conflict: false, conflictWeeks: [], assignments: [] }
+            const slot = (days[day] ??= {})[period] ??= { conflict: false, conflictWeeks: [], assignments: [] }
             const teacherNameSnapshot = assignment.week === 'alternate'
               ? cell.alternateSubject.teacherNameSnapshot
               : cell.teacherNameSnapshot
@@ -584,6 +596,7 @@ export class TimetableRepository {
     if (!configuration) throw new Error(`Timetable configuration ${configurationId} does not exist.`)
     if (typeof generationId !== 'string' || !generationId.trim()) throw invalidTimetableData('A generated timetable needs a non-empty generation ID.')
     if (!Array.isArray(sections) || sections.length === 0) throw new Error('At least one generated section is required.')
+    const { days: configuredDays, periodsPerDay, capacity } = timetableDomain(setupSnapshot)
     const candidateStaff = staff ?? await this.getTeachers(configurationId)
     const candidateStaffById = new Map()
     for (const teacher of candidateStaff) {
@@ -600,16 +613,16 @@ export class TimetableRepository {
     for (const generatedSection of sections) {
       const schedule = generatedSection.schedule
       if (!schedule || typeof schedule !== 'object'
-        || Object.keys(schedule).length !== supportedDays.size
-        || [...supportedDays].some((day) => !Object.hasOwn(schedule, day))) {
-        throw invalidTimetableData(`Section ${generatedSection.sectionId} must include all six timetable days.`)
+        || Object.keys(schedule).length !== configuredDays.length
+        || configuredDays.some((day) => !Object.hasOwn(schedule, day))) {
+        throw invalidTimetableData(`Section ${generatedSection.sectionId} must include all configured timetable days.`)
       }
       let occupiedCells = 0
-      for (const day of supportedDays) {
+      for (const day of configuredDays) {
         const dayCells = schedule[day]
-        if (!dayCells || typeof dayCells !== 'object' || Object.keys(dayCells).length !== 8
-          || Array.from({ length: 8 }, (_, index) => String(index + 1)).some((period) => !Object.hasOwn(dayCells, period))) {
-          throw invalidTimetableData(`Section ${generatedSection.sectionId} ${day} must include periods 1 through 8 exactly once.`)
+        if (!dayCells || typeof dayCells !== 'object' || Object.keys(dayCells).length !== periodsPerDay
+          || Array.from({ length: periodsPerDay }, (_, index) => String(index + 1)).some((period) => !Object.hasOwn(dayCells, period))) {
+          throw invalidTimetableData(`Section ${generatedSection.sectionId} ${day} must include periods 1 through ${periodsPerDay} exactly once.`)
         }
         for (const [periodText, cell] of Object.entries(dayCells)) {
           occupiedCells += 1
@@ -629,7 +642,7 @@ export class TimetableRepository {
           }
         }
       }
-      if (occupiedCells !== 48) throw invalidTimetableData(`Section ${generatedSection.sectionId} must contain exactly 48 timetable periods.`)
+      if (occupiedCells !== capacity) throw invalidTimetableData(`Section ${generatedSection.sectionId} must contain exactly ${capacity} timetable periods.`)
     }
 
     return withTransaction(this.database, async () => {
@@ -740,7 +753,7 @@ export class TimetableRepository {
           if (!supportedDays.has(day)) throw new Error(`Unsupported timetable day ${day}.`)
           for (const [periodText, cell] of Object.entries(dayCells ?? {})) {
             const period = Number(periodText)
-            if (!Number.isInteger(period) || period < 1 || period > 8) throw new Error(`Invalid teaching period ${periodText}.`)
+            if (!Number.isInteger(period) || period < 1 || period > periodsPerDay) throw new Error(`Invalid teaching period ${periodText}.`)
             if (!cell?.teacherId || !staffNames.has(cell.teacherId)) throw new Error(`A generated cell at ${day} P${period} has no known teacher identity.`)
             const cellType = cell.kind === 'core' ? 'SUBJECT'
               : cell.kind === 'other' ? 'OTHER_SUBJECT'
@@ -1252,13 +1265,14 @@ export class TimetableRepository {
       SELECT * FROM timetable_cells WHERE timetable_version_id = ?
       ORDER BY CASE day
         WHEN 'Monday' THEN 1 WHEN 'Tuesday' THEN 2 WHEN 'Wednesday' THEN 3
-        WHEN 'Thursday' THEN 4 WHEN 'Friday' THEN 5 WHEN 'Saturday' THEN 6 END,
+        WHEN 'Thursday' THEN 4 WHEN 'Friday' THEN 5 WHEN 'Saturday' THEN 6 WHEN 'Sunday' THEN 7 END,
         period
     `).all(version.id)
     const setupSnapshot = JSON.parse(version.setup_snapshot_json || '{}')
     const placementException = setupSnapshot.placementException
     const placementPositions = new Map()
-    const schedule = Object.fromEntries([...supportedDays].map((day) => [day, {}]))
+    const { days } = timetableDomain(setupSnapshot)
+    const schedule = Object.fromEntries(days.map((day) => [day, {}]))
     for (const row of rows) {
       const cell = cellRow(row)
       const kind = cell.cellType === 'SUBJECT' ? 'core'
@@ -1299,6 +1313,7 @@ export class TimetableRepository {
           }
         }
       }
+      if (!schedule[cell.day]) schedule[cell.day] = {}
       schedule[cell.day][cell.period] = scheduledCell
     }
     return {
@@ -1349,7 +1364,7 @@ export class TimetableRepository {
       SELECT * FROM timetable_cells WHERE timetable_version_id = ?
       ORDER BY CASE day
         WHEN 'Monday' THEN 1 WHEN 'Tuesday' THEN 2 WHEN 'Wednesday' THEN 3
-        WHEN 'Thursday' THEN 4 WHEN 'Friday' THEN 5 WHEN 'Saturday' THEN 6 END,
+        WHEN 'Thursday' THEN 4 WHEN 'Friday' THEN 5 WHEN 'Saturday' THEN 6 WHEN 'Sunday' THEN 7 END,
         period
     `).all(row.id)).map(cellRow)
     return { ...versionRow(row), cells }

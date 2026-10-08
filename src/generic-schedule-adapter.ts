@@ -1,5 +1,6 @@
 import type { GenericActivity, GenericScheduleConfig } from './generic-scheduling-model.ts'
 import type { TimetableSetup } from './models'
+import { validateCollegeTimings } from './college-timings.ts'
 
 function isPlacementActivity(name: string): boolean {
   return ['placement', 'placement training'].includes(name.trim().toLocaleLowerCase())
@@ -36,6 +37,7 @@ export function toGenericScheduleConfig(setup: TimetableSetup): GenericScheduleS
   const issues = placementRows.length > 1
     ? ['Only one Special Activities row may be named Placement or Placement Training.']
     : []
+  if (setup.collegeTimings) issues.push(...validateCollegeTimings(setup.collegeTimings))
   const testPolicy = scheduling?.testPolicy ?? 'off'
   if (testPolicy === 'on' && !(scheduling?.p1TestSubjectIds?.length)) {
     issues.push('Select at least one Core / Main Subject for P1 tests, or turn Test off.')
@@ -55,6 +57,7 @@ export function toGenericScheduleConfig(setup: TimetableSetup): GenericScheduleS
 
   return {
     config: {
+      ...(setup.collegeTimings ? { collegeTimings: setup.collegeTimings } : {}),
       department: setup.academic.department,
       academicYear: setup.academic.academicYear,
       year: setup.academic.year,

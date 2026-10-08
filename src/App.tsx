@@ -4,7 +4,7 @@ import {
   FlaskConical, GraduationCap, Plus, Settings2, Sparkles, Star, Trash2, Users,
 } from 'lucide-react'
 import type { CoreSubject, LabAssignment, LabDefinition, OtherSubject, Section, SectionName, SectionSubjectAssignment, SpecialActivity, SpecialActivityAssignment, StaffMember, TimetableSetup, WeekDay } from './models'
-import type { GeneratedSection, ScheduledCell, TimetableGenerationResult } from './scheduler'
+import type { GeneratedSection, ScheduledCell } from './scheduler'
 import { validateGenericScheduleConfig, validateGenericScheduleEdit } from './generic-scheduler.ts'
 import { toGenericScheduleConfig } from './generic-schedule-adapter.ts'
 import { cloneGeneratedSections, exchangeGeneratedTimetableCells, getEditableTimetableChoices, updateGeneratedTimetableCell } from './timetable-edit'
@@ -15,8 +15,8 @@ import { getGenerateTimetableLabel, getSectionCountLabel, getSectionIds, initial
 import { globalStaffMaster } from './staff-identities'
 import { TeacherSelector } from './TeacherSelector'
 import { CollegeTimingsPanel } from './CollegeTimingsSection'
-import { getDefaultCollegeTimings } from './college-timings.ts'
-import type { GenericGeneratedSection, GenericScheduledAlternateSubject, GenericTimetableGenerationResult } from './generic-scheduling-model.ts'
+import { calculateCollegeTimings, getDefaultCollegeTimings, usesDefaultCollegeTimetableLayout } from './college-timings.ts'
+import type { GenericGeneratedSection, GenericScheduledAlternateSubject, GenericScheduledCell, GenericTimetableGenerationResult } from './generic-scheduling-model.ts'
 import { acknowledgeGeneratedTimetable, deleteSavedTimetableVersion, generateGenericTimetableOnServer, listSavedTimetableNavigation, listSavedTimetableVersions, loadSavedTeacherUnavailableSlots, loadSavedTimetableVersion, saveTimetableVersion, setSavedTimetableVersionLock, type SavedTimetableNavigationEntry, type SavedTimetableVersionSummary } from './timetable-version-client'
 
 const departments = ['CSE', 'IT', 'AIML', 'ECE', 'EEE', 'IOT', 'RA', 'FT', 'MECH']
@@ -48,7 +48,38 @@ const timetableRows = [
   { kind: 'period', label: 'P7', time: '3:00 PM – 3:50 PM' },
   { kind: 'period', label: 'P8', time: '3:50 PM – 4:40 PM' },
 ] as const
-const periods = Array.from({ length: 8 }, (_, index) => index + 1)
+type TimetableGridSlot = { kind: 'period'; label: string; period: number; time: string }
+  | { kind: 'break'; label: string; time: string }
+
+function clockLabel(value: string): string {
+  const [hours, minutes] = value.split(':').map(Number)
+  const suffix = hours < 12 ? 'AM' : 'PM'
+  const hour = hours % 12 || 12
+  return `${hour}:${String(minutes).padStart(2, '0')} ${suffix}`
+}
+
+function collegeTimetableGrid(setup: TimetableSetup): { days: string[]; rows: TimetableGridSlot[] } {
+  const timings = setup.collegeTimings ?? getDefaultCollegeTimings()
+  const days = [...timings.workingWeekdays]
+  const usesLegacyLayout = usesDefaultCollegeTimetableLayout(timings)
+  if (usesLegacyLayout) return { days, rows: timetableRows.map((slot) => ({ ...slot, period: slot.kind === 'period' ? Number(slot.label.slice(1)) : undefined } as TimetableGridSlot)) }
+
+  const derived = calculateCollegeTimings(timings)
+  const breaksAfter = new Map(derived.breakTimings.map((entry) => [entry.afterPeriod, entry]))
+  const rows: TimetableGridSlot[] = []
+  for (const period of derived.periodTimings) {
+    rows.push({
+      kind: 'period', label: `P${period.period}`, period: period.period,
+      time: `${clockLabel(period.startTime)} – ${clockLabel(period.endTime)}`,
+    })
+    const breakTiming = breaksAfter.get(period.period)
+    if (breakTiming) rows.push({
+      kind: 'break', label: breakTiming.name,
+      time: `${clockLabel(breakTiming.startTime)} – ${clockLabel(breakTiming.endTime)}`,
+    })
+  }
+  return { days, rows }
+}
 const academicYearLabel = '2026 - 2027'
 
 function uniqueStaffMembers(members: StaffMember[]): StaffMember[] {
@@ -141,9 +172,9 @@ function configuredWeeklyHours(setup: TimetableSetup): number {
     + placementPeriods
 }
 
-function genericWorkloadIssue(total: number): string | null {
-  if (total > 48) return `Total configured workload is ${total}/48. Remove ${total - 48} weekly periods before generating.`
-  if (total < 48) return `Total configured workload is ${total}/48. Add ${48 - total} weekly periods before generating.`
+function genericWorkloadIssue(total: number, capacity: number): string | null {
+  if (total > capacity) return `Total configured workload is ${total}/${capacity}. Remove ${total - capacity} weekly periods before generating.`
+  if (total < capacity) return `Total configured workload is ${total}/${capacity}. Add ${capacity - total} weekly periods before generating.`
   return null
 }
 
@@ -342,7 +373,7 @@ interface TimetableSubjectRow {
   hours: number
 }
 
-function getTimetableSubjectRows(setup: TimetableSetup, sectionId: SectionName, generatedSection?: GeneratedSection): TimetableSubjectRow[] {
+function getTimetableSubjectRows(setup: TimetableSetup, sectionId: SectionName, generatedSection?: GenericGeneratedSection): TimetableSubjectRow[] {
   const teacherName = (teacherId: string) => setup.staff.find((person) => person.id === teacherId)?.name ?? ''
   const actualHours = (itemId: string, configuredHours: number) => generatedSection
     ? Object.values(generatedSection.schedule).flatMap((day) => Object.values(day)).filter((cell) => cell.itemId === itemId).length
@@ -378,7 +409,7 @@ function getTimetableSubjectRows(setup: TimetableSetup, sectionId: SectionName, 
   return [...coreRows, ...otherRows, ...labRows, ...activityRows]
 }
 
-function getAlternateWeekSubject(cell: ScheduledCell | undefined) {
+function getAlternateWeekSubject(cell: ScheduledCell | GenericScheduledCell | undefined) {
   return (cell as (ScheduledCell & { alternateSubject?: GenericScheduledAlternateSubject }) | undefined)?.alternateSubject
 }
 
@@ -462,12 +493,13 @@ function describeEditValidationFailure(action: string, issues: string[], setup: 
   return `${action} ${issue}`
 }
 
-function OfficialTimetable({ setup, generatedSection, onElement }: { setup: TimetableSetup; generatedSection: GeneratedSection; onElement: (element: HTMLElement | null) => void }) {
+function OfficialTimetable({ setup, generatedSection, onElement }: { setup: TimetableSetup; generatedSection: GenericGeneratedSection; onElement: (element: HTMLElement | null) => void }) {
   const sectionId = generatedSection.sectionId
   const section = setup.sections.find((item) => item.id === sectionId)
   const advisor = setup.staff.find((person) => person.id === section?.classAdvisorId)
   const subjectRows = getTimetableSubjectRows(setup, sectionId, generatedSection)
   const documentSizing = getDocumentSizing(subjectRows.length)
+  const { days, rows } = collegeTimetableGrid(setup)
   const semesterNumber = setup.academic.semester.split(' / ')[0]
   const semesterKind = ['I', 'III', 'V', 'VII'].includes(semesterNumber) ? 'ODD' : 'EVEN'
   const departmentName = setup.academic.department === 'CSE' ? 'Computer Science & Engineering' : setup.academic.department === 'RA' ? 'Robotics and Automation' : setup.academic.department
@@ -495,7 +527,7 @@ function OfficialTimetable({ setup, generatedSection, onElement }: { setup: Time
     </div>
     <div className="official-grid-wrap">
       <table className="official-grid">
-        <thead><tr><th className="official-day-heading">Day<br />/Hour</th>{timetableRows.map((slot) => {
+        <thead><tr><th className="official-day-heading">Day<br />/Hour</th>{rows.map((slot) => {
           const breakLabel = slot.label === 'Break' ? 'Morning Break' : slot.label
           const [breakStart, breakEnd] = slot.time.split(' – ')
           return <th className={slot.kind === 'break' ? 'official-break-heading' : ''} key={slot.label}>
@@ -504,19 +536,19 @@ function OfficialTimetable({ setup, generatedSection, onElement }: { setup: Time
               : <><span>{slot.label}</span><small>{slot.time}</small></>}
           </th>
         })}</tr></thead>
-        <tbody>{weekDays.map((day, dayIndex) => <tr key={day}>
+        <tbody>{days.map((day, dayIndex) => <tr key={day}>
           <th className="official-day-name">{day.slice(0, 3)}</th>
-          {timetableRows.map((slot) => {
+          {rows.map((slot) => {
             if (slot.kind === 'break') {
               if (dayIndex !== 0) return null
               const breakLabel = slot.label === 'Break' ? 'Morning Break' : slot.label
               const [breakStart, breakEnd] = slot.time.split(' – ')
-              return <td className="official-break-cell" rowSpan={weekDays.length} key={slot.label}><div className="official-break-content">
+              return <td className="official-break-cell" rowSpan={days.length} key={slot.label}><div className="official-break-content">
                 <strong>{breakLabel}</strong>
                 <small>{breakStart} – {breakEnd}</small>
               </div></td>
             }
-            const cell = generatedSection.schedule[day][Number(slot.label.slice(1))]
+            const cell = generatedSection.schedule[day as keyof GenericGeneratedSection['schedule']]?.[slot.period]
             const alternateSubject = getAlternateWeekSubject(cell)
             const alternateDescription = alternateSubject
               ? `Alternate week: ${alternateSubject.name} (${alternateSubject.abbreviation}), taught by ${alternateSubject.teacherNameSnapshot}`
@@ -659,13 +691,16 @@ function TimetableEditPanel({
 
 export function GeneratedTimetablePreview({ setup, result, onSave, preferredSectionId, isLocked = false, validateSavedOccupancy }: {
   setup: TimetableSetup
-  result: Extract<TimetableGenerationResult, { ok: true }>
-  onSave: (result: Extract<TimetableGenerationResult, { ok: true }>) => void
+  result: Extract<GenericTimetableGenerationResult, { ok: true }>
+  onSave: (result: Extract<GenericTimetableGenerationResult, { ok: true }>) => void
   preferredSectionId?: string | null
   isLocked?: boolean
   validateSavedOccupancy: (sections: GeneratedSection[]) => Promise<string[]>
 }) {
   const sectionIds = setup.sections.map((section) => section.id)
+  const collegeTimings = setup.collegeTimings ?? getDefaultCollegeTimings()
+  const timetableCapacity = collegeTimings.workingWeekdays.length * collegeTimings.periodsPerDay
+  const supportsLegacyEditing = usesDefaultCollegeTimetableLayout(setup.collegeTimings)
   const [activeSection, setActiveSection] = useState<SectionName>('A')
   const [exporting, setExporting] = useState<SectionName | null>(null)
   const [exportError, setExportError] = useState<string | null>(null)
@@ -695,7 +730,7 @@ export function GeneratedTimetablePreview({ setup, result, onSave, preferredSect
 
   const beginEditing = () => {
     if (isLocked) return
-    setDraftSections(cloneGeneratedSections(result.sections))
+    setDraftSections(cloneGeneratedSections(result.sections as unknown as GeneratedSection[]))
     setEditSection(activeSection)
     setEditError(null)
     setEditing(true)
@@ -735,7 +770,7 @@ export function GeneratedTimetablePreview({ setup, result, onSave, preferredSect
     }
   }
   const replaceCell = (sectionId: SectionName, day: WeekDay, period: number, choice: ScheduledCell): Promise<boolean> => {
-    const source = draftSections ?? result.sections
+    const source = draftSections ?? result.sections as unknown as GeneratedSection[]
     const currentCell = source.find((section) => section.sectionId === sectionId)?.schedule[day]?.[period]
     if (isProtectedEditCell(currentCell)) {
       setEditError(currentCell?.kind === 'lab'
@@ -748,7 +783,7 @@ export function GeneratedTimetablePreview({ setup, result, onSave, preferredSect
   }
   const exchangeCells = (sectionId: SectionName, first: { day: WeekDay; period: number }, second: { day: WeekDay; period: number }): Promise<boolean> => {
     if (first.day === second.day && first.period === second.period) return Promise.resolve(false)
-    const source = draftSections ?? result.sections
+    const source = draftSections ?? result.sections as unknown as GeneratedSection[]
     const section = source.find((item) => item.sectionId === sectionId)
     const firstCell = section?.schedule[first.day]?.[first.period]
     const secondCell = section?.schedule[second.day]?.[second.period]
@@ -766,7 +801,7 @@ export function GeneratedTimetablePreview({ setup, result, onSave, preferredSect
     if (!draftSections || isLocked || editValidationPending || !draftValidation || draftValidation.issues.length) return
     const validation = validateGenericScheduleEdit(editConversion.config, draftGenericSections)
     if (validation.issues.length) return
-    onSave({ ...result, sections: draftSections, validation: validation.summary })
+    onSave({ ...result, sections: draftSections as unknown as GenericGeneratedSection[], validation: validation.summary })
     setDraftSections(null)
     setEditing(false)
     setEditError(null)
@@ -921,7 +956,7 @@ export function GeneratedTimetablePreview({ setup, result, onSave, preferredSect
     <div className="generation-note generation-validation-summary">
       {result.validation.sections.map((section) => <div className="validation-summary-section" key={section.sectionId}>
         <strong>Section {section.sectionId}</strong>
-        <span>{section.periodsFilled}/48 periods filled</span>
+        <span>{section.periodsFilled}/{timetableCapacity} periods filled</span>
         <span>Core hours: {section.coreHoursValid ? 'Valid' : 'Invalid'}</span>
         <span>Other subject hours: {section.otherSubjectHoursValid ? 'Valid' : 'Invalid'}</span>
         <span>Lab allocation: {section.labAllocationValid ? 'Valid' : 'Invalid'}</span>
@@ -940,7 +975,7 @@ export function GeneratedTimetablePreview({ setup, result, onSave, preferredSect
     </div>
     <div className="timetable-edit-actions">
       {!editing
-        ? <button type="button" className="timetable-edit-primary" onClick={beginEditing} disabled={isLocked} title={isLocked ? 'Unlock this timetable version before editing.' : undefined}>Edit Timetable</button>
+        ? <button type="button" className="timetable-edit-primary" onClick={beginEditing} disabled={isLocked || !supportsLegacyEditing} title={isLocked ? 'Unlock this timetable version before editing.' : !supportsLegacyEditing ? 'Editing is available for the current timetable layout.' : undefined}>Edit Timetable</button>
         : <>
             <button type="button" className="timetable-edit-primary" onClick={saveEdits} disabled={isLocked || editValidationPending || !draftSections || Boolean(draftValidation?.issues.length)}>Save Changes</button>
             <button type="button" className="timetable-edit-secondary" onClick={cancelEditing} disabled={editValidationPending}>Cancel</button>
@@ -966,7 +1001,7 @@ export function GeneratedTimetablePreview({ setup, result, onSave, preferredSect
       </div>}
     </>}
     {exportError && <p className="export-error" role="alert">{exportError}</p>}
-    <OfficialTimetable setup={setup} generatedSection={visibleSection} onElement={(element) => { timetableElement.current = element }} />
+      <OfficialTimetable setup={setup} generatedSection={visibleSection as unknown as GenericGeneratedSection} onElement={(element) => { timetableElement.current = element }} />
   </section>
 }
 
@@ -1009,10 +1044,13 @@ function getPdfDocumentSizing(rowCount: number) {
   return { gridHeight, subjectTableHeight: 9 + safeRowCount * subjectRowHeight, subjectRowHeight, density }
 }
 
-function isCompleteGeneratedResult(result: Extract<TimetableGenerationResult, { ok: true }>, sectionIds: SectionName[]): boolean {
+function isCompleteGeneratedResult(result: Extract<GenericTimetableGenerationResult, { ok: true }>, sectionIds: SectionName[], setup: TimetableSetup): boolean {
+  const timings = setup.collegeTimings ?? getDefaultCollegeTimings()
+  const capacity = timings.workingWeekdays.length * timings.periodsPerDay
+  const expectedPeriods = Array.from({ length: timings.periodsPerDay }, (_, index) => index + 1)
   const schedulesComplete = sectionIds.every((sectionId) => {
     const sectionResult = result.sections.find((section) => section.sectionId === sectionId)
-    return Boolean(sectionResult && weekDays.every((day) => periods.every((period) => {
+    return Boolean(sectionResult && timings.workingWeekdays.every((day) => expectedPeriods.every((period) => {
       const cell = sectionResult.schedule[day]?.[period]
       return Boolean(cell?.abbreviation.trim() && cell.teacherId)
     })))
@@ -1020,7 +1058,7 @@ function isCompleteGeneratedResult(result: Extract<TimetableGenerationResult, { 
   const validationPassed = result.validation.globalTeacherClashes === 0
     && sectionIds.every((sectionId) => {
       const summary = result.validation.sections.find((section) => section.sectionId === sectionId)
-      return Boolean(summary && summary.periodsFilled === 48 && summary.coreHoursValid && summary.otherSubjectHoursValid && summary.labAllocationValid)
+      return Boolean(summary && summary.periodsFilled === capacity && summary.coreHoursValid && summary.otherSubjectHoursValid && summary.labAllocationValid)
     })
   return schedulesComplete && validationPassed
 }
@@ -1113,7 +1151,7 @@ function App() {
     && Number.isSafeInteger(requestedSectionCount)
     && requestedSectionCount > 0
     && requestedSectionCount === sectionIds.length
-  const setup = configurationForSections(storedConfiguration, sectionIds)
+  const setup = { ...configurationForSections(storedConfiguration, sectionIds), collegeTimings }
   const genericScheduling = setup.genericScheduling ?? {}
   const genericTestPolicy = genericScheduling.testPolicy ?? 'off'
   const p1TestSubjectIds = genericScheduling.p1TestSubjectIds ?? []
@@ -1125,11 +1163,12 @@ function App() {
   const targetNeedsConfiguration = isGenericConfiguration && !hasCurriculumConfiguration
   const genericScheduleConversion = isGenericConfiguration ? toGenericScheduleConfig(setup) : null
   const genericWorkload = configuredWeeklyHours(setup)
+  const weeklyTimetableCapacity = collegeTimings.workingWeekdays.length * collegeTimings.periodsPerDay
   const genericConfigurationIssues = genericScheduleConversion
     ? [
       ...genericScheduleConversion.issues,
       ...validateGenericScheduleConfig(genericScheduleConversion.config).filter((issue) => !issue.startsWith('Configured workload is ')),
-      ...(genericWorkloadIssue(genericWorkload) ? [genericWorkloadIssue(genericWorkload)!] : []),
+      ...(genericWorkloadIssue(genericWorkload, weeklyTimetableCapacity) ? [genericWorkloadIssue(genericWorkload, weeklyTimetableCapacity)!] : []),
     ]
     : []
   const genericReservedSections = Object.entries(generatedTargetSchedules)
@@ -1138,6 +1177,17 @@ function App() {
   const genericConfigurationReady = isGenericConfiguration && hasCurriculumConfiguration && genericConfigurationIssues.length === 0
   const configurationIssues = genericConfigurationIssues
   const canGenerate = genericConfigurationReady && sectionCountInputValid
+  const updateCollegeTimings = (value: typeof collegeTimings) => {
+    setCollegeTimings(value)
+    setGeneratedTargetSchedules({})
+    setGenerationResult(null)
+    setGenerationId(null)
+    setGenerationJobId(null)
+    setOpenedSavedSetup(null)
+    setOpenedSavedVersionId(null)
+    setOpenedSavedSectionId(null)
+    setVersionError(null)
+  }
   const updateSetup = (update: (current: TimetableSetup) => TimetableSetup) => {
     if (isGenericConfiguration) {
       setGeneratedTargetSchedules((current) => {
@@ -1285,7 +1335,7 @@ function App() {
   }
   const [openSection, setOpenSection] = useState<SectionKey | null>('academic')
   const [isGenerating, setIsGenerating] = useState(false)
-  const [generationResult, setGenerationResult] = useState<TimetableGenerationResult | GenericTimetableGenerationResult | null>(null)
+  const [generationResult, setGenerationResult] = useState<GenericTimetableGenerationResult | null>(null)
   const [generationId, setGenerationId] = useState<string | null>(null)
   const [generationJobId, setGenerationJobId] = useState<string | null>(null)
   const [savedGenerationId, setSavedGenerationId] = useState<string | null>(null)
@@ -1707,7 +1757,7 @@ function App() {
       return
     }
     const resultAccepted = result.ok
-      ? isCompleteGeneratedResult(result, genericScheduleConversion.config.sections.map((section) => section.id))
+      ? isCompleteGeneratedResult(result, genericScheduleConversion.config.sections.map((section) => section.id), setup)
       : false
     if (result.ok) {
       if (isGenericConfiguration) {
@@ -1730,7 +1780,7 @@ function App() {
   }
   const outputSetup = openedSavedSetup ?? setup
   const outputSectionIds = outputSetup.sections.map((section) => section.id)
-  const completeGeneration = generationResult?.ok && isCompleteGeneratedResult(generationResult, outputSectionIds) ? generationResult : null
+  const completeGeneration = generationResult?.ok && isCompleteGeneratedResult(generationResult, outputSectionIds, outputSetup) ? generationResult : null
   const acceptedGenerationJobRef = useRef<string | null>(null)
   useEffect(() => {
     if (!completeGeneration || !generationJobId || acceptedGenerationJobRef.current === generationJobId) return
@@ -1739,7 +1789,9 @@ function App() {
       event: 'FRONTEND_RESULT_ACCEPTED',
       jobId: generationJobId,
       sectionCount: completeGeneration.sections.length,
-      periodsPerSection: 48,
+      periodsPerSection: outputSetup.collegeTimings
+        ? outputSetup.collegeTimings.workingWeekdays.length * outputSetup.collegeTimings.periodsPerDay
+        : 48,
       rendered: true,
     }))
     void acknowledgeGeneratedTimetable(generationJobId).catch((error: unknown) => {
@@ -1751,7 +1803,7 @@ function App() {
     })
   }, [completeGeneration, generationJobId])
   const incompleteGenerationMessage = generationResult?.ok && !completeGeneration
-    ? 'The scheduler response did not include exactly 48 assigned teaching cells for each selected section. No partial timetable is displayed.'
+    ? 'The scheduler response did not include the configured number of assigned teaching cells for each selected section. No partial timetable is displayed.'
     : null
   const saveCurrentGeneration = async () => {
     if (!completeGeneration || !generationId || savingVersion || generationId === savedGenerationId) return
@@ -2002,7 +2054,7 @@ function App() {
       <div className="page-intro"><p className="eyebrow">ACADEMIC PLANNING</p><h1>College Timetable Generator</h1><p className="subtitle">Timetable Generator for Mrs. R. Indumathi</p><div className="intro-college"><GraduationCap size={17} /> Manakula Vinayagar Institute of Technology</div></div>
       <div className="section-list">
         <Accordion id="collegeTimings" number="00" title="COLLEGE TIMINGS" description="Configure the institution-wide working week and period timings." icon={Clock3} open={openSection === 'collegeTimings'} onToggle={toggle}>
-          <CollegeTimingsPanel value={collegeTimings} onChange={setCollegeTimings} />
+          <CollegeTimingsPanel value={collegeTimings} onChange={updateCollegeTimings} />
         </Accordion>
         <Accordion id="academic" number="01" title="Academic Details" description="Select the academic configuration for this timetable." icon={GraduationCap} open={openSection === 'academic'} onToggle={toggle}>
           <div className="academic-details-grid">
@@ -2077,8 +2129,8 @@ function App() {
                 </label>)}
             </fieldset>}
             <div className="info-note"><span className="info-mark">i</span><span>Tests use only selected Core / Main Subjects and count toward their weekly hours; Other Subjects cannot be tests. Normal Special Activities cannot use P1, and at most one normal Special Activity may be scheduled per section per day. Consecutive activity days follow the setting above.</span></div>
-            <div className="info-note"><span className="info-mark">i</span><span>Configured Workload: <strong>{genericWorkload} / 48</strong></span></div>
-            {genericWorkloadIssue(genericWorkload) && <p className="validation-error" role="alert">{genericWorkloadIssue(genericWorkload)}</p>}
+            <div className="info-note"><span className="info-mark">i</span><span>Configured Workload: <strong>{genericWorkload} / {weeklyTimetableCapacity}</strong></span></div>
+            {genericWorkloadIssue(genericWorkload, weeklyTimetableCapacity) && <p className="validation-error" role="alert">{genericWorkloadIssue(genericWorkload, weeklyTimetableCapacity)}</p>}
             {genericTestPolicy === 'on' && p1TestSubjectIds.length === 0 && <p className="validation-error" role="alert">Select at least one Core / Main Subject for P1 tests, or turn Test off.</p>}
           </section>
         </Accordion>

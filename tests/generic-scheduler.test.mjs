@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { generateGenericTimetable, validateGenericScheduleConfig } from '../src/generic-scheduler.ts'
+import { calculateCollegeTimings, getDefaultCollegeTimings } from '../src/college-timings.ts'
 
 const identity = { department: 'Example', academicYear: '2026-2027', year: 'III / 3rd Year', semester: 'Odd' }
 
@@ -14,7 +15,7 @@ function coreRows(total, idPrefix, codePrefix, namePrefix, teacherAssignments) {
   }))
 }
 
-function oneSectionConfig(coreHours, { labs = [], placement, specialActivities = [], otherSubjects = [], rules = {}, candidateCount = 2 } = {}) {
+function oneSectionConfig(coreHours, { labs = [], placement, specialActivities = [], otherSubjects = [], rules = {}, candidateCount = 2, collegeTimings, randomSeed } = {}) {
   const assignments = [{ sectionId: 'A', teacherId: 'core-teacher' }]
   const extraStaff = [
     ...labs.map((row) => row.teacherAssignments?.[0]?.teacherId),
@@ -31,8 +32,10 @@ function oneSectionConfig(coreHours, { labs = [], placement, specialActivities =
     ...(placement ? { placement } : {}),
     ...(specialActivities.length ? { specialActivities } : {}),
     ...(otherSubjects.length ? { otherSubjects } : {}),
+    ...(collegeTimings ? { collegeTimings } : {}),
     rules,
     candidateCount,
+    ...(randomSeed !== undefined ? { randomSeed } : {}),
   }
 }
 
@@ -115,6 +118,114 @@ function assertEverySectionIsComplete(result, expectedSectionCount) {
   assert.equal(new Set(signatures).size, signatures.length, 'sections must not have identical complete grids')
   return true
 }
+
+test('configured college timing keeps the default 6×8 generator path and seeded grid unchanged', () => {
+  const legacy = oneSectionConfig(48, { randomSeed: 901 })
+  const explicitDefault = oneSectionConfig(48, { randomSeed: 901, collegeTimings: getDefaultCollegeTimings() })
+  const baseline = generateGenericTimetable(legacy)
+  const configured = generateGenericTimetable(explicitDefault)
+  assert.equal(baseline.ok, true, baseline.ok ? '' : baseline.blockingConstraints.join('\n'))
+  assert.equal(configured.ok, true, configured.ok ? '' : configured.blockingConstraints.join('\n'))
+  if (!baseline.ok || !configured.ok) return
+  assert.deepEqual(configured.sections, baseline.sections)
+  assert.equal(configured.searchNodes, baseline.searchNodes)
+  assert.deepEqual(configured.validation, baseline.validation)
+  assert.equal(configured.validation.sections[0].periodsFilled, 48)
+})
+
+test('configured 5×8 and 6×7 domains emit the configured weekdays and periods', () => {
+  const defaultTimings = getDefaultCollegeTimings()
+  const fiveByEight = generateGenericTimetable(oneSectionConfig(40, {
+    collegeTimings: { ...defaultTimings, workingWeekdays: defaultTimings.workingWeekdays.slice(0, 5) },
+    randomSeed: 901,
+  }))
+  assert.equal(fiveByEight.ok, true, fiveByEight.ok ? '' : fiveByEight.blockingConstraints.join('\n'))
+  if (fiveByEight.ok) {
+    assert.deepEqual(Object.keys(fiveByEight.sections[0].schedule), ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'])
+    assert.ok(Object.values(fiveByEight.sections[0].schedule).every((day) => Object.keys(day).length === 8))
+    assert.equal(fiveByEight.validation.sections[0].periodsFilled, 40)
+  }
+
+  const sixBySeven = generateGenericTimetable(oneSectionConfig(42, {
+    collegeTimings: { ...defaultTimings, periodsPerDay: 7 }, randomSeed: 901,
+  }))
+  assert.equal(sixBySeven.ok, true, sixBySeven.ok ? '' : sixBySeven.blockingConstraints.join('\n'))
+  if (sixBySeven.ok) {
+    assert.deepEqual(Object.keys(sixBySeven.sections[0].schedule), [...defaultTimings.workingWeekdays])
+    assert.ok(Object.values(sixBySeven.sections[0].schedule).every((day) => Object.keys(day).length === 7))
+    assert.equal(sixBySeven.validation.sections[0].periodsFilled, 42)
+  }
+})
+
+test('custom break position and custom period timings remain attached to the configured domain', () => {
+  const defaultTimings = getDefaultCollegeTimings()
+  const movedBreak = {
+    ...defaultTimings,
+    breaks: defaultTimings.breaks.map((entry) => entry.name === 'Morning Break' ? { ...entry, afterPeriod: 3 } : entry),
+  }
+  assert.equal(calculateCollegeTimings(movedBreak).breakTimings.find(({ kind }) => kind === 'break').afterPeriod, 3)
+  const movedBreakResult = generateGenericTimetable(oneSectionConfig(48, { collegeTimings: movedBreak, randomSeed: 902 }))
+  assert.equal(movedBreakResult.ok, true, movedBreakResult.ok ? '' : movedBreakResult.blockingConstraints.join('\n'))
+  if (movedBreakResult.ok) assert.equal(movedBreakResult.validation.sections[0].periodsFilled, 48)
+
+  const derived = calculateCollegeTimings(defaultTimings)
+  const customTiming = {
+    ...defaultTimings,
+    timingMode: 'custom',
+    customPeriodTimings: derived.periodTimings,
+  }
+  assert.deepEqual(calculateCollegeTimings(customTiming).periodTimings, derived.periodTimings)
+  const customResult = generateGenericTimetable(oneSectionConfig(48, { collegeTimings: customTiming, randomSeed: 903 }))
+  assert.equal(customResult.ok, true, customResult.ok ? '' : customResult.blockingConstraints.join('\n'))
+  if (customResult.ok) assert.equal(customResult.validation.sections[0].periodsFilled, 48)
+})
+
+test('custom lunch position prevents continuous blocks from crossing its teaching boundary', () => {
+  const timings = getDefaultCollegeTimings()
+  timings.breaks = timings.breaks.map((entry) => entry.kind === 'lunch'
+    ? { ...entry, afterPeriod: 3 }
+    : entry.name === 'Morning Break' ? { ...entry, afterPeriod: 2 } : entry)
+  const config = oneSectionConfig(48, {
+    collegeTimings: timings,
+    randomSeed: 904,
+  })
+  const block = config.subjects[0]
+  const transferredHours = block.weeklyHours - 4
+  block.weeklyHours = 4
+  block.blockDuration = 2
+  block.allowedStartPeriods = [3, 4]
+  config.subjects[1].weeklyHours += transferredHours
+  const result = generateGenericTimetable(config)
+  assert.equal(result.ok, true, result.ok ? '' : result.blockingConstraints.join('\n'))
+  if (!result.ok) return
+  const blockEntries = scheduleEntries(result).filter(({ cell }) => cell.itemId === 'core:A:core-subject-1')
+  const blocks = collectBlocks(blockEntries, () => true)
+  assert.equal(blocks.length, 2)
+  for (const entries of blocks) {
+    const periods = entries.map(({ period }) => period).sort((left, right) => left - right)
+    assert.deepEqual(periods, [4, 5], 'a Placement or subject block must not cross the configured lunch boundary')
+  }
+})
+
+test('labs use the configured lunch boundary while keeping their normal block restrictions', () => {
+  const timings = getDefaultCollegeTimings()
+  timings.breaks = timings.breaks.map((entry) => entry.kind === 'lunch'
+    ? { ...entry, afterPeriod: 3 }
+    : entry)
+  const config = oneSectionConfig(46, {
+    collegeTimings: timings,
+    labs: [{ id: 'configured-lab', name: 'Configured Lab', weeklyPeriods: 2, blockDuration: 2,
+      allowedStartPeriods: [2, 3], teacherAssignments: [{ sectionId: 'A', teacherId: 'lab-teacher' }] }],
+    randomSeed: 905,
+  })
+  const result = generateGenericTimetable(config)
+  assert.equal(result.ok, true, result.ok ? '' : result.blockingConstraints.join('\n'))
+  if (!result.ok) return
+  const lab = scheduleEntries(result).filter(({ cell }) => cell.itemId === 'lab:A:configured-lab')
+  assert.equal(lab.length, 2)
+  assert.deepEqual(lab.map(({ period }) => period).sort((left, right) => left - right), [2, 3],
+    'the P3-P4 candidate is excluded because it crosses configured lunch')
+})
 
 test('generic engine fills multiple sections without requiring any optional curriculum category', () => {
   const result = generateGenericTimetable({
@@ -1219,10 +1330,26 @@ test('saved normal and alternate-week teacher occupancy constrains candidates be
   }
 })
 
+test('valid saved slots outside a changed domain are ignored while overlapping slots remain protected', () => {
+  const timings = { ...getDefaultCollegeTimings(), workingWeekdays: ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'], periodsPerDay: 7 }
+  const result = generateGenericTimetable({
+    schedules: [oneSectionConfig(35, { collegeTimings: timings, randomSeed: 906 })],
+    unavailableTeacherSlots: [
+      { teacherId: 'core-teacher', day: 'Sunday', period: 1 },
+      { teacherId: 'core-teacher', day: 'Monday', period: 8 },
+    ],
+  })
+  assert.equal(result.ok, true, result.ok ? '' : result.blockingConstraints.join('\n'))
+  if (result.ok) {
+    assert.deepEqual(Object.keys(result.sections[0].schedule), timings.workingWeekdays)
+    assert.equal(result.validation.sections[0].periodsFilled, 35)
+  }
+})
+
 test('saved teacher occupancy input rejects malformed slots before searching', () => {
   const result = generateGenericTimetable({
     schedules: [oneSectionConfig(48)],
-    unavailableTeacherSlots: [{ teacherId: 'teacher', day: 'Sunday', period: 9 }],
+    unavailableTeacherSlots: [{ teacherId: 'teacher', day: 'Funday', period: 0 }],
   })
   assert.equal(result.ok, false)
   if (!result.ok) {

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createServer } from 'node:http'
 import { createTimetableApiMiddleware } from '../backend/timetable-api.mjs'
+import { getDefaultCollegeTimings } from '../src/college-timings.ts'
 
 const identity = {
   department: 'CSE',
@@ -22,6 +23,18 @@ function configurationFor(teacherPeriods, { teacherId = 'teacher-1', teacherName
       teacherAssignments: sectionIds.map((sectionId) => ({ sectionId, teacherId })),
     }],
   }
+}
+
+function configurationForTeacherLimit(teacherPeriods, maximum) {
+  const config = configurationFor(teacherPeriods)
+  const remaining = 48 - teacherPeriods
+  if (remaining > 0) {
+    config.staff.push({ id: 'teacher-2', name: 'Teacher Two' })
+    config.subjects.push({ id: 'subject-2', name: 'Subject Two', weeklyHours: remaining,
+      teacherAssignments: [{ sectionId: 'A', teacherId: 'teacher-2' }] })
+  }
+  config.collegeTimings = { ...getDefaultCollegeTimings(), teacherMaximumWeeklyPeriods: maximum }
+  return config
 }
 
 function persistedSection({
@@ -113,6 +126,30 @@ test('allows 47 configured periods plus one reserved period', async () => {
     assert.equal(response.status, 202)
     await waitForCallCount(getCalls, 1)
     assert.equal(getCalls(), 1)
+  } })
+})
+
+test('allows a teacher at the configured non-default weekly maximum', async () => {
+  await withApi({ callback: async (origin, getCalls) => {
+    const response = await requestGeneration(origin, configurationForTeacherLimit(40, 40))
+    assert.equal(response.status, 202)
+    await waitForCallCount(getCalls, 1)
+    assert.equal(getCalls(), 1)
+  } })
+})
+
+test('rejects a teacher above the configured non-default maximum before scheduler invocation', async () => {
+  await withApi({ callback: async (origin, getCalls) => {
+    const response = await requestGeneration(origin, configurationForTeacherLimit(41, 40))
+    assert.equal(response.status, 422)
+    const payload = await response.json()
+    assert.equal(payload.code, 'TEACHER_WORKLOAD_LIMIT_EXCEEDED')
+    assert.deepEqual(payload.workloadViolations, [{
+      teacherId: 'teacher-1', teacherName: 'Teacher One', assignedPeriods: 41,
+      maximum: 40, exceededAmount: 1, week: 'normal',
+    }])
+    assert.match(payload.error, /weekly limit of 40 by 1 period/)
+    assert.equal(getCalls(), 0)
   } })
 })
 

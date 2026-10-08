@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { TimetableSetup } from './models'
-import type { GeneratedSection } from './scheduler'
-import { buildTeacherTimetable, findTeacherTimetableClashes, getTeachersUsedInTimetable, teacherTimetableColumns, teacherTimetableDays } from './teacher-timetable'
+import type { GenericGeneratedSection, GenericWeekDay } from './generic-scheduling-model.ts'
+import { calculateCollegeTimings, getDefaultCollegeTimings, usesDefaultCollegeTimetableLayout } from './college-timings.ts'
+import { buildTeacherTimetable, findTeacherTimetableClashes, getTeachersUsedInTimetable, teacherTimetableColumns } from './teacher-timetable'
 import { buildTeacherExportPayload, createTeacherExportXmp, embedTeacherMetadataInJpeg, embedTeacherMetadataInPng } from './teacher-export-metadata'
 
 function canvasBlob(canvas: HTMLCanvasElement, type: string, quality?: number): Promise<Blob> {
@@ -20,14 +21,35 @@ function downloadBlob(blob: Blob, filename: string): void {
   window.setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
-export function TeacherTimetableFeature({ setup, sections }: { setup: TimetableSetup; sections: GeneratedSection[] }) {
+export function TeacherTimetableFeature({ setup, sections }: { setup: TimetableSetup; sections: GenericGeneratedSection[] }) {
   const [teacherId, setTeacherId] = useState('')
   const [exporting, setExporting] = useState(false)
   const [exportError, setExportError] = useState<string | null>(null)
   const documentRef = useRef<HTMLElement | null>(null)
   const relevantTeachers = useMemo(() => getTeachersUsedInTimetable(sections, setup.staff), [sections, setup.staff])
   const teacher = relevantTeachers.find((person) => person.id === teacherId)
-  const timetable = teacher ? buildTeacherTimetable(sections, teacher.id) : null
+  const timings = setup.collegeTimings ?? getDefaultCollegeTimings()
+  const days = [...timings.workingWeekdays]
+  const periods = Array.from({ length: timings.periodsPerDay }, (_, index) => index + 1)
+  const customColumns = usesDefaultCollegeTimetableLayout(setup.collegeTimings)
+    ? null
+    : (() => {
+      const derived = calculateCollegeTimings(timings)
+      const breaksAfter = new Map(derived.breakTimings.map((entry) => [entry.afterPeriod, entry]))
+      const labelTime = (value: string) => {
+        const [hours, minutes] = value.split(':').map(Number)
+        return `${hours % 12 || 12}:${String(minutes).padStart(2, '0')} ${hours < 12 ? 'AM' : 'PM'}`
+      }
+      return derived.periodTimings.flatMap((period) => {
+        const periodColumn = { kind: 'period' as const, period: period.period }
+        const breakTiming = breaksAfter.get(period.period)
+        return breakTiming
+          ? [periodColumn, { kind: 'break' as const, label: breakTiming.name, time: `${labelTime(breakTiming.startTime)} – ${labelTime(breakTiming.endTime)}` }]
+          : [periodColumn]
+      })
+    })()
+  const columns = customColumns ?? teacherTimetableColumns
+  const timetable = teacher ? buildTeacherTimetable(sections, teacher.id, days, periods) : null
   const teacherClashes = findTeacherTimetableClashes(sections)
 
   useEffect(() => {
@@ -173,16 +195,16 @@ export function TeacherTimetableFeature({ setup, sections }: { setup: TimetableS
               <thead><tr><th>Day</th>{teacherTimetableColumns.map((column) => <th className={column.kind === 'break' ? 'teacher-structure-heading' : ''} key={column.kind === 'period' ? `P${column.period}` : column.label}>
                 {column.kind === 'period' ? `P${column.period}` : <><strong>{column.label}</strong><small>{column.time}</small></>}
               </th>)}</tr></thead>
-              <tbody>{teacherTimetableDays.map((day) => <tr key={day}>
+              <tbody>{days.map((day) => <tr key={day}>
                 <th scope="row">{day}</th>
-                {teacherTimetableColumns.map((column) => {
+                {columns.map((column) => {
                   if (column.kind === 'break') {
-                    return day === teacherTimetableDays[0]
-                      ? <td className="teacher-structure-cell" rowSpan={teacherTimetableDays.length} key={column.label}><strong>{column.label}</strong><small>{column.time}</small></td>
+                    return day === days[0]
+                      ? <td className="teacher-structure-cell" rowSpan={days.length} key={column.label}><strong>{column.label}</strong><small>{column.time}</small></td>
                       : null
                   }
                   const period = column.period
-                  const entries = timetable[day][period]
+                  const entries = timetable?.[day as GenericWeekDay]?.[period] ?? []
                   return <td className={entries.length ? 'teacher-busy-cell' : 'teacher-free-cell'} key={period}>
                     {entries.length
                       ? entries.map(({ sectionId, cell, alternateWeek }, index) => <span key={`${sectionId}-${cell.itemId}-${index}`}><strong>Section {sectionId}</strong><b>{cell.abbreviation || cell.name}{cell.isCoreTest ? ' (T)' : ''}</b>{cell.name !== cell.abbreviation && <small>{cell.name}</small>}{alternateWeek && <small>Alternate week</small>}</span>)

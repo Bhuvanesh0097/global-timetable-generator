@@ -25,7 +25,56 @@ test('PostgreSQL migrations create the timetable schema and preserve locked-vers
     `).all()
     assert.ok(triggers.some(({ trigger_name }) => trigger_name.includes('locked')))
     const migrations = await repository.database.prepare('SELECT version FROM schema_migrations ORDER BY version').all()
-    assert.deepEqual(migrations.map(({ version }) => Number(version)), [1, 2, 3])
+    assert.deepEqual(migrations.map(({ version }) => Number(version)), [1, 2, 3, 4])
+  } finally {
+    await testDatabase.cleanup()
+  }
+})
+
+test('PostgreSQL repository persists a configured timetable with Sunday and periods above eight', async () => {
+  const testDatabase = await createTestPostgresRepository()
+  const repository = testDatabase.repository
+  try {
+    const identity = {
+      department: 'CSE', year: 'II / 2nd Year', semester: 'IV / 4th Semester', academicYear: '2026 - 2027',
+    }
+    const collegeTimings = {
+      workingWeekdays: ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Sunday'],
+      periodsPerDay: 9,
+      periodDurationMinutes: 50,
+      collegeStartTime: '08:50',
+      breaks: [
+        { kind: 'break', name: 'Morning Break', afterPeriod: 2, durationMinutes: 15 },
+        { kind: 'lunch', name: 'Lunch', afterPeriod: 4, durationMinutes: 45 },
+        { kind: 'break', name: 'Tea Break', afterPeriod: 6, durationMinutes: 10 },
+      ],
+      timingMode: 'automatic',
+      teacherMaximumWeeklyPeriods: 48,
+    }
+    const staff = [{ id: 'teacher-configured-domain', name: 'Configured Domain Teacher' }]
+    const configurationId = await repository.createTimetableConfiguration({
+      ...identity,
+      collegeTimings,
+      sections: [{ id: 'A' }],
+      staff,
+      subjects: [{ id: 'subject-1', code: 'CSE201', name: 'Algorithms', weeklyHours: 54,
+        teacherAssignments: [{ sectionId: 'A', teacherId: staff[0].id }] }],
+    })
+    const schedule = Object.fromEntries(collegeTimings.workingWeekdays.map((day) => [day,
+      Object.fromEntries(Array.from({ length: collegeTimings.periodsPerDay }, (_, index) => [index + 1, {
+        itemId: 'subject-1', code: 'CSE201', abbreviation: 'ALG', name: 'Algorithms', teacherId: staff[0].id, kind: 'core',
+      }]))]))
+    await repository.saveGeneratedTimetableData({
+      configurationId,
+      generationId: 'configured-domain-generation',
+      sections: [{ sectionId: 'A', schedule }],
+      setupSnapshot: { collegeTimings, staff },
+      staff,
+    })
+    const saved = await repository.getSavedGeneration('configured-domain-generation', configurationId)
+    assert.deepEqual(Object.keys(saved.sections[0].schedule), collegeTimings.workingWeekdays)
+    assert.equal(saved.sections[0].schedule.Sunday[9].teacherId, staff[0].id)
+    assert.equal(Object.values(saved.sections[0].schedule).reduce((count, day) => count + Object.keys(day).length, 0), 54)
   } finally {
     await testDatabase.cleanup()
   }

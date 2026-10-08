@@ -107,6 +107,35 @@ export function getDefaultCollegeTimings(): CollegeTimings {
   return cloneCollegeTimings(defaultCollegeTimings)
 }
 
+/** True when the teaching-slot topology matches the existing six-day/eight-period engine. */
+export function usesDefaultCollegeTimetableDomain(value?: CollegeTimings | null): boolean {
+  if (value == null) return true
+  if (!Array.isArray(value.workingWeekdays) || !Array.isArray(value.breaks)
+    || value.breaks.some((entry) => !entry || typeof entry !== 'object')) return false
+  return value.periodsPerDay === defaultCollegeTimings.periodsPerDay
+    && value.workingWeekdays.length === defaultCollegeTimings.workingWeekdays.length
+    && value.workingWeekdays.every((day, index) => day === defaultCollegeTimings.workingWeekdays[index])
+    && value.breaks.filter((entry) => entry.kind === 'lunch').length === 1
+    && value.breaks.find((entry) => entry.kind === 'lunch')?.afterPeriod
+      === defaultCollegeTimings.breaks.find((entry) => entry.kind === 'lunch')?.afterPeriod
+}
+
+/** True when the visible clock grid is exactly the existing default layout. */
+export function usesDefaultCollegeTimetableLayout(value?: CollegeTimings | null): boolean {
+  if (value == null) return true
+  return usesDefaultCollegeTimetableDomain(value)
+    && value.timingMode === defaultCollegeTimings.timingMode
+    && value.periodDurationMinutes === defaultCollegeTimings.periodDurationMinutes
+    && value.collegeStartTime === defaultCollegeTimings.collegeStartTime
+    && Array.isArray(value.breaks)
+    && value.breaks.length === defaultCollegeTimings.breaks.length
+    && value.breaks.every((entry, index) => entry && typeof entry === 'object'
+      && entry.kind === defaultCollegeTimings.breaks[index].kind
+      && entry.name === defaultCollegeTimings.breaks[index].name
+      && entry.afterPeriod === defaultCollegeTimings.breaks[index].afterPeriod
+      && entry.durationMinutes === defaultCollegeTimings.breaks[index].durationMinutes)
+}
+
 /** Missing legacy setup values resolve to the current timetable defaults. */
 export function resolveCollegeTimings(value?: CollegeTimings | null): CollegeTimings {
   return value == null ? getDefaultCollegeTimings() : cloneCollegeTimings(value)

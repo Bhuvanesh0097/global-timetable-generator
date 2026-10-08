@@ -1,7 +1,8 @@
 import type { StaffMember, TimetableSetup } from './models'
-import type { GeneratedSection } from './scheduler'
+import type { GenericGeneratedSection } from './generic-scheduling-model.ts'
+import { collegeWeekdays, getDefaultCollegeTimings } from './college-timings.ts'
 import type { TeacherTimetable } from './teacher-timetable'
-import { teacherTimetableDays, teacherTimetablePeriods } from './teacher-timetable.ts'
+import { teacherTimetableDays } from './teacher-timetable.ts'
 
 export const TEACHER_EXPORT_GENERATOR = 'mvit-college-timetable-generator'
 export const TEACHER_EXPORT_VERSION = '1.0.0'
@@ -53,6 +54,7 @@ export interface TeacherExportPayload {
   year: string
   semester: string
   sectionList: string[]
+  timetableDomain?: { workingWeekdays: string[]; periodsPerDay: number }
   assignments: TeacherExportAssignment[]
   integrity: { algorithm: 'SHA-256'; digest: string }
 }
@@ -107,9 +109,9 @@ function createExportId(): string {
   return [...random].map((byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
-function canonicalCellData(sections: GeneratedSection[]): unknown[] {
-  return sections.flatMap((section) => teacherTimetableDays.flatMap((day) => teacherTimetablePeriods.flatMap((period) => {
-    const cell = section.schedule[day]?.[period]
+function canonicalCellData(sections: GenericGeneratedSection[], days: readonly string[], periods: readonly number[]): unknown[] {
+  return sections.flatMap((section) => days.flatMap((day) => periods.flatMap((period) => {
+    const cell = section.schedule[day as keyof GenericGeneratedSection['schedule']]?.[period]
     return cell ? [{ section: section.sectionId, day, period, itemId: cell.itemId, code: cell.code, abbreviation: cell.abbreviation, name: cell.name, teacherId: cell.teacherId, kind: cell.kind }] : []
   })))
 }
@@ -117,7 +119,7 @@ function canonicalCellData(sections: GeneratedSection[]): unknown[] {
 export async function buildTeacherExportPayload(input: {
   setup: TimetableSetup
   teacher: StaffMember
-  generatedSections: GeneratedSection[]
+  generatedSections: GenericGeneratedSection[]
   timetable: TeacherTimetable
   exportedAt?: string
   exportId?: string
@@ -127,8 +129,15 @@ export async function buildTeacherExportPayload(input: {
   const departmentName = teacherExportDepartmentNames[departmentId] ?? departmentId
   const year = normalizeYear(setup.academic.year)
   const semester = normalizeSemester(setup.academic.semester)
-  const assignments: TeacherExportAssignment[] = teacherTimetableDays.flatMap((day) => teacherTimetablePeriods.flatMap((period) =>
-    (timetable[day][period] ?? []).map(({ sectionId, cell }) => ({
+  const timings = setup.collegeTimings ?? getDefaultCollegeTimings()
+  const days = [...timings.workingWeekdays]
+  const periods = Array.from({ length: timings.periodsPerDay }, (_, index) => index + 1)
+  const defaultTimings = getDefaultCollegeTimings()
+  const usesDefaultDomain = days.length === defaultTimings.workingWeekdays.length
+    && days.every((day, index) => day === defaultTimings.workingWeekdays[index])
+    && timings.periodsPerDay === defaultTimings.periodsPerDay
+  const assignments: TeacherExportAssignment[] = days.flatMap((day) => periods.flatMap((period) =>
+    (timetable[day as keyof typeof timetable]?.[period] ?? []).map(({ sectionId, cell }) => ({
       day,
       period,
       subjectOrActivity: cell.name,
@@ -147,7 +156,7 @@ export async function buildTeacherExportPayload(input: {
 
   // The generation id fingerprints all actual generated section cells, while the
   // assignment list below is the selected teacher's exact visible projection.
-  const generationDigest = await sha256(JSON.stringify(canonicalCellData(generatedSections)))
+  const generationDigest = await sha256(JSON.stringify(canonicalCellData(generatedSections, days, periods)))
   const unsigned: Omit<TeacherExportPayload, 'integrity'> = {
     schemaVersion: 1,
     generator: { id: TEACHER_EXPORT_GENERATOR, version: TEACHER_EXPORT_VERSION },
@@ -164,6 +173,7 @@ export async function buildTeacherExportPayload(input: {
     year,
     semester,
     sectionList: generatedSections.map(({ sectionId }) => sectionId),
+    ...(!usesDefaultDomain ? { timetableDomain: { workingWeekdays: days, periodsPerDay: timings.periodsPerDay } } : {}),
     assignments,
   }
   const digest = await sha256(JSON.stringify(unsigned))
@@ -345,7 +355,7 @@ export type TeacherExportPayloadValidation =
   | { valid: false; reason: string }
 
 const supportedSemesters = new Set(['Odd', 'Even'])
-const validDays = new Set<string>(teacherTimetableDays)
+const validDays = new Set<string>(collegeWeekdays)
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -397,9 +407,22 @@ export async function validateTeacherExportPayload(value: unknown): Promise<Teac
     return { valid: false, reason: 'The source timetable metadata is malformed.' }
   }
   if (!Array.isArray(value.assignments)) return { valid: false, reason: 'The source schedule payload is missing or invalid.' }
+  const domain = isRecord(value.timetableDomain) ? value.timetableDomain : null
+  const configuredDays = domain?.workingWeekdays
+  const domainDays = domain && Array.isArray(configuredDays)
+    && configuredDays.length > 0
+    && configuredDays.every((day) => typeof day === 'string' && validDays.has(day))
+    && new Set(configuredDays).size === configuredDays.length
+    ? new Set(configuredDays) : new Set(teacherTimetableDays)
+  const domainPeriods = domain && Number.isSafeInteger(domain.periodsPerDay) && Number(domain.periodsPerDay) > 0
+    ? Number(domain.periodsPerDay) : 8
+  if (domain && (!Array.isArray(configuredDays) || domainDays.size !== configuredDays.length
+    || domainPeriods !== domain.periodsPerDay)) {
+    return { valid: false, reason: 'The timetable domain metadata is invalid.' }
+  }
   for (const assignment of value.assignments) {
-    if (!isRecord(assignment) || !validDays.has(String(assignment.day)) ||
-      !Number.isInteger(assignment.period) || !teacherTimetablePeriods.includes(assignment.period as number) ||
+    if (!isRecord(assignment) || !domainDays.has(String(assignment.day)) ||
+      !Number.isInteger(assignment.period) || Number(assignment.period) < 1 || Number(assignment.period) > domainPeriods ||
       !isNonEmptyString(assignment.subjectOrActivity) || typeof assignment.abbreviation !== 'string' ||
       typeof assignment.code !== 'string' || !isNonEmptyString(assignment.kind) || !isNonEmptyString(assignment.section) ||
       !value.sectionList.includes(assignment.section) || assignment.teacherId !== value.teacherId ||
