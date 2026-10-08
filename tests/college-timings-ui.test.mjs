@@ -42,6 +42,16 @@ test('break count is editable and resizes the existing break definitions', () =>
   assert.match(panel, /onChange\(\{ \.\.\.value, breaks: nextBreaks \}\)/)
 })
 
+test('working days is a native number input backed by weekday selection', () => {
+  const panel = readFileSync(new URL('../src/CollegeTimingsSection.tsx', import.meta.url), 'utf8')
+
+  assert.match(panel, /aria-label="Working Days" type="number" min=\{1\} max=\{collegeWeekdays\.length\} step=\{1\} value=\{value\.workingWeekdays\.length\} onChange=\{\(event\) => updateWorkingDayCount\(/)
+  assert.match(panel, /const updateWorkingDayCount = \(requestedCount: number\)/)
+  assert.match(panel, /const count = Math\.max\(1, Math\.min\(collegeWeekdays\.length, Math\.trunc\(requestedCount\)\)\)/)
+  assert.match(panel, /onChange\(\{ \.\.\.value, workingWeekdays: nextWorkingWeekdays \}\)/)
+  assert.match(panel, /checked=\{value\.workingWeekdays\.includes\(day\)\}/)
+})
+
 test('College Timings input controls remain connected to the existing state', () => {
   const panel = readFileSync(new URL('../src/CollegeTimingsSection.tsx', import.meta.url), 'utf8')
   const controlledUpdates = [

@@ -65,6 +65,24 @@ export function CollegeTimingsPanel({ value, onChange }: CollegeTimingsPanelProp
     })
   }
 
+  const updateWorkingDayCount = (requestedCount: number) => {
+    if (!Number.isFinite(requestedCount)) return
+    const count = Math.max(1, Math.min(collegeWeekdays.length, Math.trunc(requestedCount)))
+    const selected = new Set(value.workingWeekdays)
+    const nextWorkingWeekdays = collegeWeekdays.filter((weekday) => selected.has(weekday))
+
+    if (count < nextWorkingWeekdays.length) {
+      nextWorkingWeekdays.splice(count)
+    } else {
+      for (const weekday of collegeWeekdays) {
+        if (nextWorkingWeekdays.length >= count) break
+        if (!selected.has(weekday)) nextWorkingWeekdays.push(weekday)
+      }
+    }
+
+    onChange({ ...value, workingWeekdays: nextWorkingWeekdays })
+  }
+
   const updateTimingMode = (timingMode: CollegeTimingMode) => {
     if (timingMode === 'automatic') {
       const { customPeriodTimings: _customPeriodTimings, ...automatic } = value
@@ -133,7 +151,7 @@ export function CollegeTimingsPanel({ value, onChange }: CollegeTimingsPanelProp
 
   return <>
     <div className="field-grid">
-      <label className="field"><span>Working Days</span><input aria-label="Working Days" value={value.workingWeekdays.length} readOnly /></label>
+      <label className="field"><span>Working Days</span><input aria-label="Working Days" type="number" min={1} max={collegeWeekdays.length} step={1} value={value.workingWeekdays.length} onChange={(event) => updateWorkingDayCount(numberInputValue(event.target.value))} /></label>
       <label className="field"><span>Periods Per Day</span><input aria-label="Periods Per Day" type="number" min={1} step={1} value={value.periodsPerDay} onChange={(event) => updatePeriodCount(numberInputValue(event.target.value))} /></label>
       <label className="field"><span>Period Duration (minutes)</span><input aria-label="Period Duration (minutes)" type="number" min={1} step={1} value={value.periodDurationMinutes} onChange={(event) => onChange({ ...value, periodDurationMinutes: numberInputValue(event.target.value) })} /></label>
       <label className="field"><span>College Start Time</span><input aria-label="College Start Time" type="time" value={value.collegeStartTime} onChange={(event) => onChange({ ...value, collegeStartTime: event.target.value })} /></label>
