@@ -8,6 +8,7 @@ import type { TimetableRepository } from './timetable-repository.mjs'
 export interface TimetableGenerationWorkerInput {
   configuration: GenericScheduleConfig
   reservedSections: GenericGeneratedSection[]
+  placementAllocations?: GenericScheduleConfig[]
   unavailableTeacherSlots: GenericUnavailableTeacherSlot[]
   alternateWeekUnavailableTeacherSlots: GenericUnavailableTeacherSlot[]
 }

@@ -8,16 +8,22 @@ function generate(input) {
   const {
     configuration,
     reservedSections,
+    placementAllocations,
     unavailableTeacherSlots,
     alternateWeekUnavailableTeacherSlots,
   } = input
   const randomAllocation = configuration.placementException?.enabled
     && configuration.placementException.allocationMode === 'random'
-  const attempts = randomAllocation ? 8 : 1
+  const preflightAllocations = randomAllocation && Array.isArray(placementAllocations)
+    ? placementAllocations
+    : undefined
+  const attempts = preflightAllocations ? preflightAllocations.length : randomAllocation ? 8 : 1
   let lastResult
 
   for (let attempt = 0; attempt < attempts; attempt += 1) {
-    const allocation = randomizeGenericPlacementAlternates(configuration)
+    const allocation = preflightAllocations
+      ? { config: preflightAllocations[attempt], issues: [] }
+      : randomizeGenericPlacementAlternates(configuration)
     if (allocation.issues.length) {
       return {
         result: {

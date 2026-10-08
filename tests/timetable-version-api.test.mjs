@@ -31,7 +31,10 @@ test('version API persists, locks, reloads, unlocks, and deletes a PostgreSQL ti
     const identity = {
       department: 'CSE', year: 'II / 2nd Year', semester: 'IV / 4th Semester', academicYear: '2026 - 2027',
     }
-    const staff = [{ id: 'teacher-1', name: 'Teacher One' }]
+    const staff = [
+      { id: 'teacher-1', name: 'Teacher One' },
+      { id: 'teacher-2', name: 'Teacher Two' },
+    ]
     const sections = [{ id: 'A', classAdvisorId: 'teacher-1' }]
     const configuration = {
       ...identity, sections, staff,
@@ -61,6 +64,10 @@ test('version API persists, locks, reloads, unlocks, and deletes a PostgreSQL ti
     assert.equal(save.status, 201, saved.error)
     assert.equal(saved.savedVersion.status, 'SAVED')
     assert.equal(saved.savedVersion.versionNumber, 1)
+    const savedWorkload = await repository.getActiveTeacherWeeklyWorkloadSections()
+    assert.equal(savedWorkload.length, 1)
+    assert.equal(savedWorkload[0].normal.length, 48)
+    assert.ok(savedWorkload[0].normal.every(({ teacherId }) => teacherId === 'teacher-1'))
 
     const version = saved.timetableVersions.find(({ sectionName }) => sectionName === 'A')
     const lock = await fetch(`${origin}/api/timetable-versions/${version.versionId}/lock`, { method: 'POST' })
@@ -77,6 +84,28 @@ test('version API persists, locks, reloads, unlocks, and deletes a PostgreSQL ti
     assert.deepEqual(loaded.sections[0].schedule, schedule)
     assert.deepEqual(loaded.setupSnapshot, setupSnapshot)
     assert.equal(loaded.versions[0].status, 'LOCKED')
+    const lockedWorkload = await repository.getActiveTeacherWeeklyWorkloadSections()
+    assert.equal(lockedWorkload[0].normal.length, 48)
+    assert.ok(lockedWorkload[0].normal.every(({ teacherId }) => teacherId === 'teacher-1'))
+
+    const replacementSchedule = Object.fromEntries(days.map((day) => [day, Object.fromEntries(
+      Array.from({ length: 8 }, (_, index) => [index + 1, {
+        itemId: 'subject-1', name: 'Algorithms', abbreviation: 'ALG',
+        teacherId: 'teacher-2', teacherName: 'Teacher Two', kind: 'core',
+      }]),
+    )]))
+    await repository.saveGeneratedTimetableData({
+      configurationId: saved.configurationId,
+      generationId: 'postgres-api-generation-2',
+      sections: [{ sectionId: 'A', ...identity, schedule: replacementSchedule }],
+      validation: { valid: true },
+      setupSnapshot,
+      staff,
+    })
+    const replacementWorkload = await repository.getActiveTeacherWeeklyWorkloadSections()
+    assert.equal(replacementWorkload.length, 1)
+    assert.equal(replacementWorkload[0].normal.length, 48)
+    assert.ok(replacementWorkload[0].normal.every(({ teacherId }) => teacherId === 'teacher-2'))
 
     const blockedDelete = await fetch(`${origin}/api/timetable-versions/${version.versionId}`, { method: 'DELETE' })
     assert.equal(blockedDelete.status, 409)
@@ -85,7 +114,10 @@ test('version API persists, locks, reloads, unlocks, and deletes a PostgreSQL ti
     assert.equal((await unlock.json()).savedVersion.status, 'SAVED')
     const deletion = await fetch(`${origin}/api/timetable-versions/${version.versionId}`, { method: 'DELETE' })
     assert.equal(deletion.status, 200)
-    assert.equal((await repository.getSavedTimetableNavigation()).length, 0)
+    assert.equal((await repository.getSavedTimetableNavigation()).length, 1)
+    const afterInactiveDelete = await repository.getActiveTeacherWeeklyWorkloadSections()
+    assert.equal(afterInactiveDelete.length, 1)
+    assert.ok(afterInactiveDelete[0].normal.every(({ teacherId }) => teacherId === 'teacher-2'))
   } finally {
     await stopServer()
     await testDatabase.cleanup()

@@ -864,6 +864,84 @@ export class TimetableRepository {
     }
   }
 
+  async getActiveTeacherWeeklyWorkloadSections() {
+    const activeCells = await this.database.prepare(`
+      SELECT versions.id AS version_id, versions.setup_snapshot_json,
+        cells.teacher_id, cells.teacher_name_snapshot, cells.cell_type, cells.day, cells.period, cells.block_id,
+        sections.source_id AS section_source_id,
+        configurations.department, configurations.year, configurations.semester, configurations.academic_year
+      FROM generated_timetables timetables
+      JOIN timetable_versions versions
+        ON versions.id = timetables.active_version_id
+        AND versions.status IN ('SAVED', 'LOCKED')
+      JOIN timetable_cells cells ON cells.timetable_version_id = versions.id
+      JOIN sections ON sections.id = timetables.section_id
+      JOIN timetable_configurations configurations ON configurations.id = timetables.configuration_id
+    `).all()
+
+    const snapshots = new Map()
+    const snapshotFor = (row) => {
+      if (!snapshots.has(row.version_id)) {
+        try { snapshots.set(row.version_id, JSON.parse(row.setup_snapshot_json || '{}')) }
+        catch { snapshots.set(row.version_id, {}) }
+      }
+      return snapshots.get(row.version_id)
+    }
+    const placementBlocks = new Map()
+    for (const row of activeCells) {
+      if (row.cell_type !== 'PLACEMENT' || snapshotFor(row).placementException?.enabled !== true) continue
+      const blockKey = `${row.version_id}|${row.day}|${row.block_id || `unblocked:${row.section_source_id}`}`
+      const block = placementBlocks.get(blockKey) ?? []
+      block.push(row)
+      placementBlocks.set(blockKey, block)
+    }
+    const alternateTeacherForCell = new Map()
+    for (const block of placementBlocks.values()) {
+      const ordered = [...block].sort((left, right) => left.period - right.period)
+      const setupSnapshot = snapshotFor(ordered[0])
+      const alternates = setupSnapshot.placementException?.alternateSubjects ?? []
+      for (const [index, row] of ordered.entries()) {
+        const alternate = alternates.find((candidate) =>
+          candidate.placementPosition === index + 1 && candidate.sectionId === row.section_source_id)
+          ?? alternates.find((candidate) => candidate.placementPosition === index + 1 && !candidate.sectionId)
+        const assignment = alternate?.teacherAssignments?.find((candidate) => candidate.sectionId === row.section_source_id)
+        if (!assignment?.teacherId) continue
+        alternateTeacherForCell.set(row, {
+          teacherId: assignment.teacherId,
+          teacherName: assignment.teacherNameSnapshot
+            || setupSnapshot.staff?.find((teacher) => teacher.id === assignment.teacherId)?.name
+            || assignment.teacherId,
+        })
+      }
+    }
+
+    const sections = new Map()
+    for (const row of activeCells) {
+      if (!row.teacher_id) continue
+      const sectionKey = [row.department, row.year, row.semester, row.academic_year, row.section_source_id].join('\u0000')
+      let section = sections.get(sectionKey)
+      if (!section) {
+        section = {
+          department: row.department,
+          year: row.year,
+          semester: row.semester,
+          academicYear: row.academic_year,
+          sectionId: row.section_source_id,
+          normal: [],
+          alternate: [],
+        }
+        sections.set(sectionKey, section)
+      }
+      section.normal.push({ teacherId: row.teacher_id, teacherName: row.teacher_name_snapshot ?? row.teacher_id })
+      const alternate = alternateTeacherForCell.get(row)
+      section.alternate.push(alternate ?? {
+        teacherId: row.teacher_id,
+        teacherName: row.teacher_name_snapshot ?? row.teacher_id,
+      })
+    }
+    return [...sections.values()]
+  }
+
   async getTimetableById(timetableId) {
     const row = await this.database.prepare(`
       SELECT timetables.*, sections.section_name

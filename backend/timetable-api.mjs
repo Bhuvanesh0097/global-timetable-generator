@@ -1,10 +1,13 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { runGenericTimetableGeneration } from './generic-scheduler-worker-pool.mjs'
+import { randomizeGenericPlacementAlternates } from '../src/generic-schedule-adapter.ts'
 
 const maximumBodyBytes = 2 * 1024 * 1024
 const defaultMaximumRetainedGenerationJobs = 1024
 const defaultGenerationJobRetentionMs = 10 * 60 * 1000
 const supportedDays = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+const maximumTeacherWeeklyPeriods = 48
+const randomPlacementAllocationAttempts = 8
 const setupArrayFields = [
   'staff', 'sections', 'coreSubjects', 'otherSubjectMaster', 'otherSubjects', 'labMaster',
   'labAssignments', 'specialActivities', 'sectionSubjectAssignments', 'specialActivityAssignments',
@@ -100,6 +103,187 @@ function generationStaff(configuration) {
   return configuration.staff.filter((teacher) => teacherIds.has(teacher.id))
 }
 
+function timetableSectionKey(identity, sectionId) {
+  return [identity.department, identity.year, identity.semester, identity.academicYear, sectionId].join('\u0000')
+}
+
+function weeklyPeriodCount(value) {
+  return Number.isFinite(value) && value > 0 ? value : 0
+}
+
+function addTeacherPeriods(target, teacherId, periods) {
+  const count = weeklyPeriodCount(periods)
+  if (!teacherId || !count) return
+  target.set(teacherId, (target.get(teacherId) ?? 0) + count)
+}
+
+function configuredTeacherWorkload(configuration) {
+  const normal = new Map()
+  const alternate = new Map()
+  const countRows = (rows, field, enabled) => {
+    for (const section of configuration.sections) {
+      for (const row of rows ?? []) {
+        if (!enabled(row)) continue
+        const assignment = row.teacherAssignments?.find((entry) => entry.sectionId === section.id)
+        const periods = weeklyPeriodCount(row[field])
+        addTeacherPeriods(normal, assignment?.teacherId, periods)
+        addTeacherPeriods(alternate, assignment?.teacherId, periods)
+      }
+    }
+  }
+
+  countRows(configuration.subjects, 'weeklyHours', () => true)
+  countRows(configuration.otherSubjects, 'weeklyHours', (row) => row.enabled !== false)
+  countRows(configuration.labs, 'weeklyPeriods', (row) => row.enabled !== false)
+  countRows(configuration.specialActivities, 'weeklyPeriods', (row) => row.enabled === true)
+
+  const placement = configuration.placement
+  if (placement?.enabled) {
+    const periods = weeklyPeriodCount(placement.weeklyPeriods)
+    const duration = weeklyPeriodCount(placement.blockDuration) || periods
+    const exception = configuration.placementException
+    for (const section of configuration.sections) {
+      const baseTeacherId = placement.teacherAssignments?.find((entry) => entry.sectionId === section.id)?.teacherId
+      addTeacherPeriods(normal, baseTeacherId, periods)
+
+      let remaining = periods
+      while (remaining > 0) {
+        const blockLength = Math.min(duration, remaining)
+        for (let position = 1; position <= blockLength; position += 1) {
+          const alternateDefinition = exception?.enabled
+            ? exception.alternateSubjects?.find((row) => row.placementPosition === position && row.sectionId === section.id)
+              ?? exception.alternateSubjects?.find((row) => row.placementPosition === position && !row.sectionId)
+            : undefined
+          const alternateTeacherId = alternateDefinition?.teacherAssignments?.find((entry) => entry.sectionId === section.id)?.teacherId
+          addTeacherPeriods(alternate, alternateTeacherId || baseTeacherId, 1)
+        }
+        remaining -= blockLength
+      }
+    }
+  }
+
+  return { normal, alternate }
+}
+
+function addReservedSectionWorkload(totals, section) {
+  for (const dayCells of Object.values(section.schedule ?? {})) {
+    for (const cell of Object.values(dayCells ?? {})) {
+      if (!cell?.teacherId) continue
+      addTeacherPeriods(totals.normal, cell.teacherId, 1)
+      addTeacherPeriods(totals.alternate, cell.alternateSubject?.teacherId || cell.teacherId, 1)
+    }
+  }
+}
+
+function mergeWorkloadTotals(target, source) {
+  for (const [teacherId, periods] of source) {
+    addTeacherPeriods(target, teacherId, periods)
+  }
+}
+
+function teacherWorkloadViolations(totals, teacherNames) {
+  const teacherIds = new Set([...totals.normal.keys(), ...totals.alternate.keys()])
+  return [...teacherIds].flatMap((teacherId) => {
+    const normalPeriods = totals.normal.get(teacherId) ?? 0
+    const alternatePeriods = totals.alternate.get(teacherId) ?? 0
+    const week = alternatePeriods > normalPeriods ? 'alternate' : 'normal'
+    const assignedPeriods = Math.max(normalPeriods, alternatePeriods)
+    if (assignedPeriods <= maximumTeacherWeeklyPeriods) return []
+    return [{
+      teacherId,
+      teacherName: teacherNames.get(teacherId) ?? teacherId,
+      assignedPeriods,
+      maximum: maximumTeacherWeeklyPeriods,
+      exceededAmount: assignedPeriods - maximumTeacherWeeklyPeriods,
+      week,
+    }]
+  }).sort((left, right) => left.teacherId.localeCompare(right.teacherId))
+}
+
+function teacherWorkloadErrorMessage(violations) {
+  const details = violations.map(({ teacherName, assignedPeriods, exceededAmount }) =>
+    `${teacherName} is assigned ${assignedPeriods} periods, exceeding the weekly limit of ${maximumTeacherWeeklyPeriods} by ${exceededAmount} period${exceededAmount === 1 ? '' : 's'}.`)
+  return `Teacher Workload Limit Exceeded:\n${details.join('\n')}\nReduce the teacher's assigned workload before generating.`
+}
+
+function activeSectionWorkloadKey(section) {
+  return timetableSectionKey(section, section.sectionId)
+}
+
+function preflightTeacherWorkload({ configuration, reservedSections, activeSections, knownTeachers, randomPlacementAllocations }) {
+  const identity = {
+    department: configuration.department,
+    year: configuration.year,
+    semester: configuration.semester,
+    academicYear: configuration.academicYear,
+  }
+  const candidateKeys = new Set(configuration.sections.map(({ id }) => timetableSectionKey(identity, id)))
+  const reservedKeys = new Set(reservedSections
+    .filter((section) => !candidateKeys.has(timetableSectionKey(section, section.sectionId)))
+    .map((section) => timetableSectionKey(section, section.sectionId)))
+  const replacedKeys = new Set([...candidateKeys, ...reservedKeys])
+  const teacherNames = new Map((knownTeachers ?? []).map((teacher) => [
+    teacher.id,
+    teacher.canonicalName ?? teacher.name ?? teacher.id,
+  ]))
+  for (const teacher of configuration.staff ?? []) {
+    if (teacher?.id) teacherNames.set(teacher.id, teacher.canonicalName ?? teacher.name ?? teacher.id)
+  }
+  const base = { normal: new Map(), alternate: new Map() }
+
+  for (const section of activeSections ?? []) {
+    for (const period of section.normal ?? []) {
+      if (!teacherNames.has(period.teacherId) && period.teacherName) teacherNames.set(period.teacherId, period.teacherName)
+    }
+    for (const period of section.alternate ?? []) {
+      if (!teacherNames.has(period.teacherId) && period.teacherName) teacherNames.set(period.teacherId, period.teacherName)
+    }
+    if (replacedKeys.has(activeSectionWorkloadKey(section))) continue
+    for (const period of section.normal ?? []) {
+      addTeacherPeriods(base.normal, period.teacherId, 1)
+    }
+    for (const period of section.alternate ?? []) {
+      addTeacherPeriods(base.alternate, period.teacherId, 1)
+    }
+  }
+
+  const countedReservedKeys = new Set()
+  for (const section of reservedSections) {
+    const key = timetableSectionKey(section, section.sectionId)
+    if (candidateKeys.has(key) || countedReservedKeys.has(key)) continue
+    countedReservedKeys.add(key)
+    if (section.teacherNames && typeof section.teacherNames === 'object') {
+      for (const [teacherId, name] of Object.entries(section.teacherNames)) {
+        if (!teacherNames.has(teacherId) && name) teacherNames.set(teacherId, name)
+      }
+    }
+    addReservedSectionWorkload(base, section)
+  }
+
+  const candidates = randomPlacementAllocations?.length ? randomPlacementAllocations : [configuration]
+  const validCandidates = []
+  let strongestViolation = []
+  let strongestExceededAmount = -1
+  for (const candidate of candidates) {
+    const totals = { normal: new Map(base.normal), alternate: new Map(base.alternate) }
+    const candidateTotals = configuredTeacherWorkload(candidate)
+    mergeWorkloadTotals(totals.normal, candidateTotals.normal)
+    mergeWorkloadTotals(totals.alternate, candidateTotals.alternate)
+    const violations = teacherWorkloadViolations(totals, teacherNames)
+    if (!violations.length) {
+      validCandidates.push(candidate)
+      continue
+    }
+    const exceededAmount = violations.reduce((sum, violation) => sum + violation.exceededAmount, 0)
+    if (exceededAmount > strongestExceededAmount) {
+      strongestExceededAmount = exceededAmount
+      strongestViolation = violations
+    }
+  }
+
+  return { validCandidates, violations: strongestViolation, teacherNames }
+}
+
 function canonicalizeGenerationInput(value) {
   if (Array.isArray(value)) return value.map(canonicalizeGenerationInput)
   if (value && typeof value === 'object') {
@@ -147,7 +331,7 @@ export function createTimetableApiMiddleware(repository, {
     }
   }
 
-  const runGenerationJob = async (job, { configuration, reservedSections, identity, occupancyStaff }) => {
+  const runGenerationJob = async (job, { configuration, reservedSections, identity, occupancyStaff, placementAllocations }) => {
     job.status = 'running'
     job.startedAt = Date.now()
     logGenerationEvent('GENERATION_JOB_STARTED', {
@@ -168,6 +352,7 @@ export function createTimetableApiMiddleware(repository, {
         const generated = await runGeneration({
           configuration,
           reservedSections,
+          ...(placementAllocations ? { placementAllocations } : {}),
           unavailableTeacherSlots: occupancy.unavailableSlots,
           alternateWeekUnavailableTeacherSlots: occupancy.alternateWeekUnavailableSlots,
           generationJobId: job.id,
@@ -286,6 +471,43 @@ export function createTimetableApiMiddleware(repository, {
           return
         }
         if (existingJobId) activeGenerationFingerprints.delete(fingerprint)
+        let randomPlacementAllocations
+        const randomPlacement = configuration.placementException?.enabled
+          && configuration.placementException.allocationMode === 'random'
+        if (randomPlacement) {
+          randomPlacementAllocations = []
+          for (let attempt = 0; attempt < randomPlacementAllocationAttempts; attempt += 1) {
+            const allocation = randomizeGenericPlacementAlternates(configuration)
+            if (allocation.issues.length) {
+              randomPlacementAllocations = undefined
+              break
+            }
+            randomPlacementAllocations.push(allocation.config)
+          }
+        }
+        const [activeSections, knownTeachers] = await Promise.all([
+          repository.getActiveTeacherWeeklyWorkloadSections?.() ?? [],
+          repository.getTeachers?.() ?? [],
+        ])
+        const workload = preflightTeacherWorkload({
+          configuration,
+          reservedSections,
+          activeSections,
+          knownTeachers,
+          randomPlacementAllocations,
+        })
+        if (!workload.validCandidates.length) {
+          logGenerationEvent('TEACHER_WORKLOAD_LIMIT_REJECTED', {
+            requestFingerprint: fingerprint,
+            violations: workload.violations.length,
+          })
+          sendJson(response, 422, {
+            error: teacherWorkloadErrorMessage(workload.violations),
+            code: 'TEACHER_WORKLOAD_LIMIT_EXCEEDED',
+            workloadViolations: workload.violations,
+          })
+          return
+        }
         if (generationJobs.size >= maximumRetainedGenerationJobs) {
           sendJson(response, 503, {
             error: 'The generation job registry is at capacity. Please try again shortly.',
@@ -310,6 +532,9 @@ export function createTimetableApiMiddleware(repository, {
             reservedSections,
             identity,
             occupancyStaff,
+            ...(randomPlacement && randomPlacementAllocations
+              ? { placementAllocations: workload.validCandidates }
+              : {}),
           })
         })
         return

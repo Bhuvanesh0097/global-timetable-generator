@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createGenericSchedulerWorkerPool } from '../backend/generic-scheduler-worker-pool.mjs'
+import { randomizeGenericPlacementAlternates } from '../src/generic-schedule-adapter.ts'
 
 test('worker executes the existing TypeScript scheduler and returns its structured validation failure', async () => {
   const pool = createGenericSchedulerWorkerPool({ workerCount: 1 })
@@ -100,6 +101,52 @@ test('worker preserves random Placement allocation for the existing UI state upd
       alternateWeekUnavailableTeacherSlots: [],
     })
 
+    assert.equal(response.result.ok, true)
+    assert.equal(response.placementException?.allocationMode, 'random')
+    assert.equal(response.placementException?.alternateSubjects.length, 2)
+  } finally {
+    await pool.close()
+  }
+})
+
+test('worker searches preflighted random Placement allocations without rerandomizing them', async () => {
+  const pool = createGenericSchedulerWorkerPool({ workerCount: 1 })
+  try {
+    const configuration = {
+      department: 'CSE',
+      academicYear: '2026 - 2027',
+      year: 'II / 2nd Year',
+      semester: 'V / 5th Semester',
+      sections: [{ id: 'A' }],
+      staff: [
+        { id: 'ST001', name: 'Core Teacher' },
+        { id: 'ST002', name: 'Placement Teacher' },
+      ],
+      subjects: [1, 2].map((index) => ({
+        id: `subject-${index}`,
+        name: `Subject ${index}`,
+        weeklyHours: 23,
+        teacherAssignments: [{ sectionId: 'A', teacherId: 'ST001' }],
+      })),
+      placement: {
+        id: 'placement',
+        name: 'Placement',
+        enabled: true,
+        weeklyPeriods: 2,
+        blockDuration: 2,
+        teacherAssignments: [{ sectionId: 'A', teacherId: 'ST002' }],
+      },
+      placementException: { enabled: true, allocationMode: 'random', alternateSubjects: [] },
+    }
+    const allocation = randomizeGenericPlacementAlternates(configuration)
+    assert.deepEqual(allocation.issues, [])
+    const response = await pool.run({
+      configuration,
+      placementAllocations: [allocation.config],
+      reservedSections: [],
+      unavailableTeacherSlots: [],
+      alternateWeekUnavailableTeacherSlots: [],
+    })
     assert.equal(response.result.ok, true)
     assert.equal(response.placementException?.allocationMode, 'random')
     assert.equal(response.placementException?.alternateSubjects.length, 2)

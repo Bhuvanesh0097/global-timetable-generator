@@ -120,6 +120,15 @@ export class TimetableRepository {
       existing: { department: string; year: string; semester: string; section: string; subject: string }
     }>
   }>
+  getActiveTeacherWeeklyWorkloadSections(): Promise<Array<{
+    department: string
+    year: string
+    semester: string
+    academicYear: string
+    sectionId: string
+    normal: Array<{ teacherId: string; teacherName: string }>
+    alternate: Array<{ teacherId: string; teacherName: string }>
+  }>>
   setSavedTimetableVersionStatus(input: { versionId: string; status: 'SAVED' | 'LOCKED' }): Promise<(SavedGeneration & { versionId: string; sectionName: string }) | null>
   saveGeneratedTimetableData(input: { configurationId: string; generationId: string; sections: SavedGeneration['sections']; validation: unknown; setupSnapshot: TimetableSetup; staff?: GenericScheduleConfig['staff'] }): Promise<unknown[]>
 }
