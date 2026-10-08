@@ -106,13 +106,38 @@ export function CollegeTimingsPanel({ value, onChange }: CollegeTimingsPanelProp
     })
   }
 
+  const updateBreakCount = (requestedCount: number) => {
+    const maximumCount = Math.max(0, value.periodsPerDay - 2)
+    const count = Math.max(0, Math.min(Math.trunc(requestedCount), maximumCount))
+    const nextBreaks = [...value.breaks]
+    const currentRegularBreaks = nextBreaks.filter((entry) => entry.kind === 'break')
+
+    if (count < currentRegularBreaks.length) {
+      const removedBreaks = new Set(currentRegularBreaks.slice(count))
+      for (let index = nextBreaks.length - 1; index >= 0; index -= 1) {
+        if (removedBreaks.has(nextBreaks[index])) nextBreaks.splice(index, 1)
+      }
+    } else {
+      const occupiedPositions = new Set(nextBreaks.map((entry) => entry.afterPeriod))
+      for (let index = currentRegularBreaks.length; index < count; index += 1) {
+        const afterPeriod = Array.from({ length: Math.max(0, value.periodsPerDay - 1) }, (_, position) => position + 1)
+          .find((period) => !occupiedPositions.has(period))
+        if (!afterPeriod) break
+        occupiedPositions.add(afterPeriod)
+        nextBreaks.push({ kind: 'break', name: `Break ${index + 1}`, afterPeriod, durationMinutes: 10 })
+      }
+    }
+
+    onChange({ ...value, breaks: nextBreaks })
+  }
+
   return <>
     <div className="field-grid">
       <label className="field"><span>Working Days</span><input aria-label="Working Days" value={value.workingWeekdays.length} readOnly /></label>
       <label className="field"><span>Periods Per Day</span><input aria-label="Periods Per Day" type="number" min={1} step={1} value={value.periodsPerDay} onChange={(event) => updatePeriodCount(numberInputValue(event.target.value))} /></label>
       <label className="field"><span>Period Duration (minutes)</span><input aria-label="Period Duration (minutes)" type="number" min={1} step={1} value={value.periodDurationMinutes} onChange={(event) => onChange({ ...value, periodDurationMinutes: numberInputValue(event.target.value) })} /></label>
       <label className="field"><span>College Start Time</span><input aria-label="College Start Time" type="time" value={value.collegeStartTime} onChange={(event) => onChange({ ...value, collegeStartTime: event.target.value })} /></label>
-      <label className="field"><span>Break Count</span><input aria-label="Break Count" value={regularBreaks.length} readOnly /></label>
+      <label className="field"><span>Break Count</span><input aria-label="Break Count" type="number" min={0} max={Math.max(0, value.periodsPerDay - 2)} step={1} value={regularBreaks.length} onChange={(event) => updateBreakCount(numberInputValue(event.target.value))} /></label>
       <label className="field"><span>Timing Mode</span><select aria-label="Timing Mode" value={value.timingMode} onChange={(event) => updateTimingMode(event.target.value as CollegeTimingMode)}>
         <option value="automatic">Automatic</option>
         <option value="custom">Custom</option>
