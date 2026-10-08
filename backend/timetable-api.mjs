@@ -634,6 +634,26 @@ export function createTimetableApiMiddleware(repository, {
         return
       }
 
+      if (request.method === 'GET' && pathname === '/overall-staff-timetable') {
+        const teacherId = url.searchParams.get('teacherId')
+        if (teacherId !== null) {
+          if (!teacherId.trim()) {
+            sendJson(response, 400, { error: 'A teacher ID is required for the overall staff timetable lookup.' })
+            return
+          }
+          const timetable = await repository.getOverallStaffTimetable(teacherId)
+          if (!timetable) {
+            sendJson(response, 404, { error: 'That Staff Master teacher was not found.' })
+            return
+          }
+          sendJson(response, 200, timetable)
+          return
+        }
+        const teachers = await repository.searchGlobalStaff(url.searchParams.get('search') ?? '')
+        sendJson(response, 200, { teachers })
+        return
+      }
+
       if (request.method === 'POST' && pathname === '/timetable-conflicts') {
         const body = await readJsonBody(request)
         const { identity, sections, staff } = body ?? {}

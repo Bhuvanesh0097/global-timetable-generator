@@ -445,6 +445,132 @@ export class TimetableRepository {
     }))
   }
 
+  async searchGlobalStaff(search = '') {
+    const query = String(search ?? '').trim()
+    if (!query) return this.getTeachers()
+    const normalizedQuery = normalizedTeacherName(query)
+    const teachers = await this.getTeachers()
+    const exactIdMatch = teachers.find((teacher) => teacher.id === query)
+    if (exactIdMatch) return [exactIdMatch]
+    const exactNameMatches = teachers.filter((teacher) => teacher.normalizedName === normalizedQuery)
+    if (exactNameMatches.length > 0) return exactNameMatches
+    return teachers.filter((teacher) => teacher.normalizedName.includes(normalizedQuery))
+  }
+
+  async getOverallStaffTimetable(teacherId) {
+    const requestedTeacherId = String(teacherId ?? '')
+    const teacher = (await this.getTeachers()).find((candidate) => candidate.id === requestedTeacherId)
+    if (!teacher) return null
+
+    const activeVersionCells = await this.database.prepare(`
+      SELECT versions.id AS version_id, versions.generation_id AS version_generation_id,
+        versions.status AS version_status, versions.setup_snapshot_json,
+        timetables.configuration_id, timetables.section_id,
+        sections.source_id AS section_source_id, sections.section_name AS configured_section_name,
+        configurations.department AS configured_department, configurations.year AS configured_year,
+        configurations.semester AS configured_semester, configurations.academic_year AS configured_academic_year,
+        cells.*
+      FROM generated_timetables timetables
+      JOIN timetable_versions versions
+        ON versions.id = timetables.active_version_id
+        AND versions.status IN ('SAVED', 'LOCKED')
+      JOIN sections ON sections.id = timetables.section_id
+      JOIN timetable_configurations configurations ON configurations.id = timetables.configuration_id
+      JOIN timetable_cells cells ON cells.timetable_version_id = versions.id
+      ORDER BY configurations.department, configurations.year, configurations.semester,
+        configurations.academic_year, sections.section_name, versions.id,
+        CASE cells.day
+          WHEN 'Monday' THEN 1 WHEN 'Tuesday' THEN 2 WHEN 'Wednesday' THEN 3
+          WHEN 'Thursday' THEN 4 WHEN 'Friday' THEN 5 WHEN 'Saturday' THEN 6 END,
+        cells.period
+    `).all()
+
+    const days = Object.fromEntries([...supportedDays].map((day) => [day, {}]))
+    const activeVersions = new Map()
+    for (const row of activeVersionCells) {
+      let activeVersion = activeVersions.get(row.version_id)
+      if (!activeVersion) {
+        activeVersion = {
+          version: {
+            id: row.version_id,
+            generation_id: row.version_generation_id,
+            status: row.version_status,
+            setup_snapshot_json: row.setup_snapshot_json,
+            configuration_id: row.configuration_id,
+            section_id: row.section_id,
+            section_source_id: row.section_source_id,
+            section_name: row.configured_section_name,
+            department: row.configured_department,
+            year: row.configured_year,
+            semester: row.configured_semester,
+            academic_year: row.configured_academic_year,
+          },
+          cells: [],
+        }
+        activeVersions.set(row.version_id, activeVersion)
+      }
+      activeVersion.cells.push(row)
+    }
+
+    for (const { version, cells: persistedCells } of activeVersions.values()) {
+      const section = await this.savedVersionSection(version, persistedCells)
+      const persistedCellBySlot = new Map(persistedCells.map((cell) => [`${cell.day}|${cell.period}`, cell]))
+
+      for (const day of supportedDays) {
+        for (const [periodText, savedCell] of Object.entries(section.schedule[day] ?? {})) {
+          const period = Number(periodText)
+          const persistedCell = persistedCellBySlot.get(`${day}|${period}`)
+          const cell = {
+            ...savedCell,
+            cellType: persistedCell?.cell_type,
+            teacherNameSnapshot: persistedCell?.teacher_name_snapshot ?? '',
+          }
+          const assignments = []
+          if (cell.teacherId === requestedTeacherId) assignments.push({ week: 'normal' })
+          if (cell.alternateSubject?.teacherId === requestedTeacherId) assignments.push({ week: 'alternate' })
+
+          for (const assignment of assignments) {
+            const slot = days[day][period] ??= { conflict: false, conflictWeeks: [], assignments: [] }
+            const teacherNameSnapshot = assignment.week === 'alternate'
+              ? cell.alternateSubject.teacherNameSnapshot
+              : cell.teacherNameSnapshot
+            slot.assignments.push({
+              teacherId: requestedTeacherId,
+              teacherName: teacher.canonicalName,
+              teacherNameSnapshot: teacherNameSnapshot || teacher.canonicalName,
+              week: assignment.week,
+              department: section.department,
+              year: section.year,
+              semester: section.semester,
+              academicYear: section.academicYear,
+              sectionId: section.sectionId,
+              sectionName: version.section_name,
+              versionId: version.id,
+              generationId: version.generation_id,
+              versionStatus: version.status,
+              cell,
+            })
+          }
+        }
+      }
+    }
+
+    for (const daySlots of Object.values(days)) {
+      for (const slot of Object.values(daySlots)) {
+        const countsByWeek = new Map()
+        for (const assignment of slot.assignments) {
+          countsByWeek.set(assignment.week, (countsByWeek.get(assignment.week) ?? 0) + 1)
+        }
+        slot.conflictWeeks = [...countsByWeek]
+          .filter(([, count]) => count > 1)
+          .map(([week]) => week)
+        slot.conflict = slot.conflictWeeks.length > 0
+      }
+    }
+
+    return { teacher, days }
+  }
+
   async getTimetableConfigurationByIdentity({ department, year, semester, academicYear, configurationVersion = 1 }) {
     const row = await this.database.prepare(`
       SELECT id FROM timetable_configurations
@@ -1121,8 +1247,8 @@ export class TimetableRepository {
     }
   }
 
-  async savedVersionSection(version) {
-    const rows = await this.database.prepare(`
+  async savedVersionSection(version, persistedRows) {
+    const rows = persistedRows ?? await this.database.prepare(`
       SELECT * FROM timetable_cells WHERE timetable_version_id = ?
       ORDER BY CASE day
         WHEN 'Monday' THEN 1 WHEN 'Tuesday' THEN 2 WHEN 'Wednesday' THEN 3

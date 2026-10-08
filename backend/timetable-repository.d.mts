@@ -46,6 +46,53 @@ export interface SavedGeneration {
   versions: Array<Record<string, unknown>>
 }
 
+export interface OverallStaffAssignment {
+  teacherId: string
+  teacherName: string
+  teacherNameSnapshot: string
+  week: 'normal' | 'alternate'
+  department: string
+  year: string
+  semester: string
+  academicYear: string
+  sectionId: string
+  sectionName: string
+  versionId: string
+  generationId: string
+  versionStatus: 'SAVED' | 'LOCKED'
+  cell: {
+    itemId: string
+    blockId?: string
+    code: string
+    abbreviation: string
+    name: string
+    teacherId: string
+    teacherNameSnapshot: string
+    kind: 'core' | 'other' | 'lab' | 'activity'
+    isCoreTest?: boolean
+    cellType: 'SUBJECT' | 'OTHER_SUBJECT' | 'LAB' | 'PLACEMENT' | 'SPECIAL_ACTIVITY'
+    alternateSubject?: {
+      placementPosition: number
+      subjectId: string
+      subjectKind: 'core' | 'other'
+      code: string
+      abbreviation: string
+      name: string
+      teacherId: string
+      teacherNameSnapshot: string
+    }
+  }
+}
+
+export interface OverallStaffTimetable {
+  teacher: { id: string; canonicalName: string; normalizedName: string; createdAt: Date; updatedAt: Date }
+  days: Record<string, Record<number, {
+    conflict: boolean
+    conflictWeeks: Array<'normal' | 'alternate'>
+    assignments: OverallStaffAssignment[]
+  }>>
+}
+
 export class TimetableRepository {
   close(): Promise<void>
   withSaveTransaction<T>(work: () => Promise<T>): Promise<T>
@@ -53,6 +100,8 @@ export class TimetableRepository {
   getTimetableConfiguration(configurationId: string): Promise<GenericScheduleConfig | null>
   getSections(configurationId: string): Promise<Array<{ id: string; name: string; classAdvisorId?: string }>>
   getTeachers(configurationId?: string): Promise<Array<{ id: string; canonicalName: string; normalizedName: string; createdAt: Date; updatedAt: Date }>>
+  searchGlobalStaff(search?: string): Promise<Array<{ id: string; canonicalName: string; normalizedName: string; createdAt: Date; updatedAt: Date }>>
+  getOverallStaffTimetable(teacherId: string): Promise<OverallStaffTimetable | null>
   getTimetableConfigurationByIdentity(identity: { department: string; year: string; semester: string; academicYear: string; configurationVersion?: number }): Promise<string | null>
   getSavedGenerationSummaries(identity: { department: string; year: string; semester: string; academicYear: string }): Promise<SavedVersionSummary[]>
   getSavedTimetableNavigation(): Promise<SavedTimetableNavigationEntry[]>
