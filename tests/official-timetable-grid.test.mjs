@@ -86,12 +86,12 @@ test('export day-row sizing preserves the six-day formula and fills configured d
   assert.ok(sixDayRow > sevenDayRow)
 })
 
-test('section export paths retain A3 PDF, PNG, JPG, and print formats while sizing rows from the configured grid', async () => {
+test('section PDF, PNG, JPG, and print exports use the same A4 landscape layout without changing the preview', async () => {
   const app = await readFile(new URL('../src/App.tsx', import.meta.url), 'utf8')
   const styles = await readFile(new URL('../src/styles.css', import.meta.url), 'utf8')
 
   assert.match(app, /window\.print\(\)/)
-  assert.match(app, /format: 'a3'/)
+  assert.match(app, /format: 'a4'/)
   assert.match(app, /canvas\.toDataURL\('image\/png'\)/)
   assert.match(app, /canvas\.toDataURL\('image\/jpeg', 0\.95\)/)
   assert.match(app, /querySelectorAll\('\.official-grid tbody tr'\)\.length/)
@@ -99,4 +99,7 @@ test('section export paths retain A3 PDF, PNG, JPG, and print formats while sizi
   assert.match(app, /element\.style\.setProperty\('--export-day-row-height', `\$\{pdfSizing\.dayRowHeight\}mm`\)/)
   assert.match(styles, /\.official-grid tbody tr[^\n]*height:var\(--document-day-row-height\)/)
   assert.match(styles, /data-pdf-layout="true"\] \.official-grid tbody tr\{height:var\(--export-day-row-height\)/)
+  assert.ok(styles.includes('width:297mm!important'))
+  assert.ok(styles.includes('writing-mode:horizontal-tb!important'))
+  assert.ok(styles.includes('@page{size:A4 landscape;margin:0}'))
 })

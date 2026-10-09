@@ -69,28 +69,23 @@ export function TeacherTimetableFeature({ setup, sections }: { setup: TimetableS
     })
     if (logo && logo.naturalWidth === 0) throw new Error('The MVIT logo could not be loaded.')
     const { default: html2canvas } = await import('html2canvas')
-    element.dataset.teacherExport = 'true'
-    try {
-      await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
-      return await html2canvas(element, {
-        scale: 2,
-        backgroundColor: '#ffffff',
-        useCORS: true,
-        logging: false,
-        windowWidth: Math.ceil(297 * 96 / 25.4),
-        windowHeight: Math.ceil(210 * 96 / 25.4),
-        onclone: (_document, clone) => {
-          clone.dataset.teacherExport = 'true'
-          clone.style.width = '297mm'
-          clone.style.height = '210mm'
-          clone.style.minHeight = '210mm'
-          clone.style.maxWidth = 'none'
-          clone.style.boxSizing = 'border-box'
-        },
-      })
-    } finally {
-      delete element.dataset.teacherExport
-    }
+    await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+    return html2canvas(element, {
+      scale: 2,
+      backgroundColor: '#ffffff',
+      useCORS: true,
+      logging: false,
+      windowWidth: Math.ceil(297 * 96 / 25.4),
+      windowHeight: Math.ceil(210 * 96 / 25.4),
+      onclone: (_document, clone) => {
+        clone.dataset.teacherExport = 'true'
+        clone.style.width = '297mm'
+        clone.style.height = '210mm'
+        clone.style.minHeight = '210mm'
+        clone.style.maxWidth = 'none'
+        clone.style.boxSizing = 'border-box'
+      },
+    })
   }
 
   const withExport = async (action: (canvas: HTMLCanvasElement, payload: Awaited<ReturnType<typeof buildTeacherExportPayload>>) => Promise<void> | void) => {

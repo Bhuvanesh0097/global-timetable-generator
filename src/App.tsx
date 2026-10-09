@@ -9,11 +9,11 @@ import { validateGenericScheduleConfig, validateGenericScheduleEdit } from './ge
 import { toGenericScheduleConfig } from './generic-schedule-adapter.ts'
 import { cloneGeneratedSections, exchangeGeneratedTimetableCells, getEditableTimetableChoices, updateGeneratedTimetableCell } from './timetable-edit'
 import { TeacherTimetableFeature } from './TeacherTimetable'
-import { ConsolidatedFacultyTimetable } from './ConsolidatedFacultyTimetable'
 import { OverallStaffTimetableFeature } from './OverallStaffTimetable'
 import { getGenerateTimetableLabel, getSectionCountLabel, getSectionIds, initializeConfiguredSections } from './section-configuration'
 import { globalStaffMaster } from './staff-identities'
 import { TeacherSelector } from './TeacherSelector'
+import { formatSavedVersionTimestamp } from './saved-version-display'
 import { CollegeTimingsPanel } from './CollegeTimingsSection'
 import { getDefaultCollegeTimings, usesDefaultCollegeTimetableLayout } from './college-timings.ts'
 import { buildOfficialTimetableGrid, getOfficialGridDayRowHeight, timetableRows } from './official-timetable-grid.ts'
@@ -785,33 +785,33 @@ export function GeneratedTimetablePreview({ setup, result, onSave, preferredSect
 
   const captureSection = async (element: HTMLElement) => {
     const { default: html2canvas } = await import('html2canvas')
-    element.dataset.exportLayout = 'true'
-    const clearExportSizing = applyExportSizing(element)
-    let capturedCanvas: HTMLCanvasElement
-    try {
-      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
-      capturedCanvas = await html2canvas(element, {
-        scale: 2,
-        backgroundColor: '#ffffff',
-        useCORS: true,
-        logging: false,
-        windowWidth: Math.ceil(210 * 96 / 25.4),
-        windowHeight: Math.ceil(297 * 96 / 25.4),
-        onclone: (_document, clone) => {
-          clone.dataset.exportLayout = 'true'
-          clone.style.width = '210mm'
-          clone.style.height = '297mm'
-          clone.style.minHeight = '297mm'
-          clone.style.maxWidth = 'none'
-          clone.style.boxSizing = 'border-box'
-          clone.style.padding = '7mm'
-        },
-      })
-    } finally {
-      delete element.dataset.exportLayout
-      clearExportSizing()
-    }
-    return capturedCanvas
+    const subjectRows = element.querySelectorAll('.official-subject-table tbody tr').length
+    const dayCount = element.querySelectorAll('.official-grid tbody tr').length
+    const exportSizing = getPdfDocumentSizing(subjectRows, dayCount)
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+    return html2canvas(element, {
+      scale: 2,
+      backgroundColor: '#ffffff',
+      useCORS: true,
+      logging: false,
+      windowWidth: Math.ceil(297 * 96 / 25.4),
+      windowHeight: Math.ceil(210 * 96 / 25.4),
+      onclone: (_document, clone) => {
+        clone.dataset.exportLayout = 'true'
+        clone.dataset.pdfLayout = 'true'
+        clone.style.width = '297mm'
+        clone.style.height = '210mm'
+        clone.style.minHeight = '210mm'
+        clone.style.maxWidth = 'none'
+        clone.style.boxSizing = 'border-box'
+        clone.style.padding = '7mm'
+        clone.style.setProperty('--export-grid-height', `${exportSizing.gridHeight}mm`)
+        clone.style.setProperty('--export-day-row-height', `${exportSizing.dayRowHeight}mm`)
+        clone.style.setProperty('--export-subject-height', `${exportSizing.subjectTableHeight}mm`)
+        clone.style.setProperty('--export-subject-row-height', `${exportSizing.subjectRowHeight}mm`)
+        clone.style.setProperty('--export-density-scale', String(exportSizing.density))
+      },
+    })
   }
 
   const capturePdfSection = async (element: HTMLElement) => {
@@ -827,17 +827,17 @@ export function GeneratedTimetablePreview({ setup, result, onSave, preferredSect
       backgroundColor: '#ffffff',
       useCORS: true,
       logging: false,
-      windowWidth: Math.ceil(402 * 96 / 25.4),
-      windowHeight: Math.ceil(284 * 96 / 25.4),
+      windowWidth: Math.ceil(297 * 96 / 25.4),
+      windowHeight: Math.ceil(210 * 96 / 25.4),
       onclone: (_document, clone) => {
         clone.dataset.exportLayout = 'true'
         clone.dataset.pdfLayout = 'true'
-        clone.style.width = '402mm'
-        clone.style.height = '284mm'
-        clone.style.minHeight = '284mm'
+        clone.style.width = '297mm'
+        clone.style.height = '210mm'
+        clone.style.minHeight = '210mm'
         clone.style.maxWidth = 'none'
         clone.style.boxSizing = 'border-box'
-        clone.style.padding = '0'
+        clone.style.padding = '7mm'
         clone.style.setProperty('--export-grid-height', `${pdfSizing.gridHeight}mm`)
         clone.style.setProperty('--export-day-row-height', `${pdfSizing.dayRowHeight}mm`)
         clone.style.setProperty('--export-subject-height', `${pdfSizing.subjectTableHeight}mm`)
@@ -864,14 +864,16 @@ export function GeneratedTimetablePreview({ setup, result, onSave, preferredSect
     const subjectRows = element.querySelectorAll('.official-subject-table tbody tr').length
     const dayCount = element.querySelectorAll('.official-grid tbody tr').length
     const pdfSizing = getPdfDocumentSizing(subjectRows, dayCount)
-    element.style.setProperty('--export-grid-height', `${pdfSizing.gridHeight}mm`)
-    element.style.setProperty('--export-day-row-height', `${pdfSizing.dayRowHeight}mm`)
-    element.style.setProperty('--export-subject-height', `${pdfSizing.subjectTableHeight}mm`)
-    element.style.setProperty('--export-subject-row-height', `${pdfSizing.subjectRowHeight}mm`)
-    element.style.setProperty('--export-density-scale', String(pdfSizing.density))
-    element.dataset.exportLayout = 'true'
-    element.dataset.pdfLayout = 'true'
-    element.dataset.printTarget = 'true'
+    const applyPrintLayout = () => {
+      element.style.setProperty('--export-grid-height', `${pdfSizing.gridHeight}mm`)
+      element.style.setProperty('--export-day-row-height', `${pdfSizing.dayRowHeight}mm`)
+      element.style.setProperty('--export-subject-height', `${pdfSizing.subjectTableHeight}mm`)
+      element.style.setProperty('--export-subject-row-height', `${pdfSizing.subjectRowHeight}mm`)
+      element.style.setProperty('--export-density-scale', String(pdfSizing.density))
+      element.dataset.exportLayout = 'true'
+      element.dataset.pdfLayout = 'true'
+      element.dataset.printTarget = 'true'
+    }
     const removeTarget = () => {
       delete element.dataset.printTarget
       delete element.dataset.exportLayout
@@ -881,8 +883,10 @@ export function GeneratedTimetablePreview({ setup, result, onSave, preferredSect
       element.style.removeProperty('--export-subject-height')
       element.style.removeProperty('--export-subject-row-height')
       element.style.removeProperty('--export-density-scale')
+      window.removeEventListener('beforeprint', applyPrintLayout)
       window.removeEventListener('afterprint', removeTarget)
     }
+    window.addEventListener('beforeprint', applyPrintLayout, { once: true })
     window.addEventListener('afterprint', removeTarget, { once: true })
     window.print()
     // Some embedded browsers suppress the print dialog and never dispatch afterprint.
@@ -909,8 +913,8 @@ export function GeneratedTimetablePreview({ setup, result, onSave, preferredSect
   const downloadPdf = (sectionId: SectionName) => withExport(sectionId, async (element) => {
     const canvas = await capturePdfSection(element)
     const { jsPDF } = await import('jspdf')
-    const pdf = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a3', compress: true })
-    pdf.addImage(canvas.toDataURL('image/png'), 'PNG', 9, 6.5, 402, 284, undefined, 'FAST')
+    const pdf = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4', compress: true })
+    pdf.addImage(canvas.toDataURL('image/png'), 'PNG', 0, 0, 297, 210, undefined, 'FAST')
     pdf.save(`MVIT-Timetable-Section-${sectionId}.pdf`)
   })
 
@@ -967,25 +971,6 @@ export function GeneratedTimetablePreview({ setup, result, onSave, preferredSect
   </section>
 }
 
-function applyExportSizing(element: HTMLElement) {
-  const rows = Array.from(element.querySelectorAll('.official-subject-table tbody tr'))
-  const longestCell = Math.max(0, ...Array.from(element.querySelectorAll('.official-subject-table td, .official-grid td span'), (cell) => cell.textContent?.trim().length ?? 0))
-  const dayCount = element.querySelectorAll('.official-grid tbody tr').length
-  const sizing = getDocumentSizing(rows.length, longestCell, dayCount)
-  element.style.setProperty('--document-density', String(sizing.density))
-  element.style.setProperty('--document-grid-height', `${sizing.gridHeight}mm`)
-  element.style.setProperty('--document-day-row-height', `${sizing.dayRowHeight}mm`)
-  element.style.setProperty('--document-subject-table-height', `${sizing.subjectTableHeight}mm`)
-  element.style.setProperty('--document-subject-row-height', `${sizing.subjectRowHeight}mm`)
-  return () => {
-    element.style.removeProperty('--document-density')
-    element.style.removeProperty('--document-grid-height')
-    element.style.removeProperty('--document-day-row-height')
-    element.style.removeProperty('--document-subject-table-height')
-    element.style.removeProperty('--document-subject-row-height')
-  }
-}
-
 function getDocumentSizing(rowCount: number, longestCell = 0, dayCount = 6) {
   // A4's 283mm inner height is shared by fixed header/footer areas, the dynamic
   // subject table, and a generous timetable grid. This stays row-driven rather
@@ -1002,13 +987,18 @@ function getDocumentSizing(rowCount: number, longestCell = 0, dayCount = 6) {
 
 function getPdfDocumentSizing(rowCount: number, dayCount = 6) {
   const safeRowCount = Math.max(1, rowCount)
-  // The A3 landscape sheet has 205mm available for the configured day grid and the
-  // variable-height subject/staff rows after its fixed header and footer.
-  const subjectRowHeight = Math.min(7.2, 105 / safeRowCount)
-  const gridHeight = Math.max(100, 205 - safeRowCount * subjectRowHeight)
-  const density = Math.max(0.78, Math.min(1, subjectRowHeight / 7.2))
-  const dayRowHeight = getOfficialGridDayRowHeight(gridHeight, 21, dayCount)
-  return { gridHeight, dayRowHeight, subjectTableHeight: 9 + safeRowCount * subjectRowHeight, subjectRowHeight, density }
+  // A4 landscape provides 194mm of content height after the 7mm page padding
+  // and border. The fixed header, title, notes and signature areas use 62mm;
+  // the remaining area is shared by the day grid and the unmodified subject table.
+  const availableForGridAndSubjects = 132
+  const tableHeadingHeight = 6
+  const minimumGridHeight = 60
+  const subjectRowHeight = Math.min(3.8, Math.max(2.1, (availableForGridAndSubjects - minimumGridHeight - tableHeadingHeight) / safeRowCount))
+  const subjectTableHeight = tableHeadingHeight + safeRowCount * subjectRowHeight
+  const gridHeight = Math.max(36, availableForGridAndSubjects - subjectTableHeight)
+  const density = Math.max(0.82, Math.min(1, subjectRowHeight / 3.8))
+  const dayRowHeight = getOfficialGridDayRowHeight(gridHeight, 16, dayCount)
+  return { gridHeight, dayRowHeight, subjectTableHeight, subjectRowHeight, density }
 }
 
 function isCompleteGeneratedResult(result: Extract<GenericTimetableGenerationResult, { ok: true }>, sectionIds: SectionName[], setup: TimetableSetup): boolean {
@@ -1991,7 +1981,7 @@ function App() {
                                 type="button"
                                 className={`saved-timetable-version${openedSavedVersionId === version.versionId ? ' active' : ''}`}
                                 aria-pressed={openedSavedVersionId === version.versionId}
-                                title={`${version.status} · ${version.createdAt}`}
+                                title={`${version.status} · ${formatSavedVersionTimestamp(version.createdAt)}`}
                                 disabled={openingVersion}
                                 onClick={() => void openSavedTimetableVersion(version.versionId)}
                               >
@@ -2120,7 +2110,7 @@ function App() {
             <select aria-label="Saved timetable version" value={selectedSavedVersionId} onChange={(event) => setSelectedSavedVersionId(event.target.value)} disabled={versionsLoading || savedVersions.length === 0}>
               {savedVersions.length === 0
                 ? <option value="">{versionsLoading ? 'Loading…' : 'No saved versions'}</option>
-                : savedVersions.map((version) => <option key={version.versionId} value={version.versionId}>Version {version.versionNumber} · Section {version.sectionName} · {version.createdAt}{version.status === 'LOCKED' ? ' · LOCKED' : ''}</option>)}
+                : savedVersions.map((version) => <option key={version.versionId} value={version.versionId}>Version {version.versionNumber} · Section {version.sectionName} · {formatSavedVersionTimestamp(version.createdAt)}{version.status === 'LOCKED' ? ' · LOCKED' : ''}</option>)}
             </select>
           </label>
           {selectedSavedVersion && <button type="button" className="timetable-version-open" onClick={toggleSavedVersionLock} disabled={lockingVersion || versionsLoading || openingVersion || savingVersion}>
@@ -2160,7 +2150,6 @@ function App() {
           : isGenerating
             ? null
             : <p className="no-timetable-placeholder">No timetable generated yet.</p>}
-      <ConsolidatedFacultyTimetable />
       <OverallStaffTimetableFeature />
       </main>
     </div>

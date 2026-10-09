@@ -1,1 +1,10 @@
-.teacher-selector{position:relative;min-width:0;width:100%}.teacher-selector>input{box-sizing:border-box;width:100%;height:31px;min-width:95px;padding:6px 8px;border:1px solid #ccd6e2;border-radius:4px;background:#fff;color:#24354b;font-size:11px}.teacher-selector>input:focus{outline:2px solid #1268d833;border-color:#1268d8}.teacher-selector--field>input{height:36px;font-size:12px}.teacher-selector--teacher-view>input{height:36px;padding:7px 9px;font-size:12px}.teacher-selector-options{position:absolute;z-index:40;top:calc(100% + 2px);left:0;right:0;max-height:220px;overflow:auto;border:1px solid #dce5f0;border-radius:4px;background:#fff;box-shadow:0 4px 12px #172b4d1f}.teacher-selector-option,.teacher-selector-empty{padding:7px 9px;color:#304563;font-size:11px;line-height:1.35;overflow-wrap:anywhere}.teacher-selector-option{cursor:pointer}.teacher-selector-option:hover,.teacher-selector-option.active,.teacher-selector-option[aria-selected=true]{background:#eff6ff;color:#174f90}.teacher-selector-empty{color:#687a97}
+.teacher-selector{position:relative;min-width:0;width:100%}
+.teacher-selector>input{box-sizing:border-box;width:100%;height:31px;min-width:95px;padding:6px 8px;border:1px solid #ccd6e2;border-radius:4px;background:#fff;color:#24354b;font-size:11px}
+.teacher-selector>input:focus{outline:2px solid #1268d833;border-color:#1268d8}
+.teacher-selector--field>input{height:36px;font-size:12px}
+.teacher-selector--teacher-view>input{height:36px;padding:7px 9px;font-size:12px}
+.teacher-selector-options{position:fixed;z-index:10000;max-height:220px;overflow:auto;border:1px solid #dce5f0;border-radius:4px;background:#fff;box-shadow:0 4px 12px #172b4d1f}
+.teacher-selector-option,.teacher-selector-empty{padding:7px 9px;color:#304563;font-size:11px;line-height:1.35;overflow-wrap:anywhere}
+.teacher-selector-option{cursor:pointer}
+.teacher-selector-option:hover,.teacher-selector-option.active,.teacher-selector-option[aria-selected=true]{background:#eff6ff;color:#174f90}
+.teacher-selector-empty{color:#687a97}
