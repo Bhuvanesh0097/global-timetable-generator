@@ -1943,8 +1943,7 @@ function App() {
   }
   return <div className="app-shell">
     <header className="topbar">
-      <img className="college-logo" src="/college_banner.png" alt="Manakula Vinayagar Institute of Technology banner" style={{ display: 'block', width: 'min(350px, calc(100vw - 34px))', height: 64, objectFit: 'fill' }} />
-      <div className="college-name">Manakula Vinayagar Institute of Technology</div>
+      <img className="college-banner" src="/college_banner.png" alt="Manakula Vinayagar Institute of Technology" />
     </header>
 
     <div className="workspace-layout">
@@ -2008,7 +2007,7 @@ function App() {
               </nav>}
       </aside>
       <main className="main-content">
-      <div className="page-intro"><p className="eyebrow">ACADEMIC PLANNING</p><h1>College Timetable Generator</h1><p className="subtitle">Timetable Generator for Mrs. R. Indumathi</p><div className="intro-college"><GraduationCap size={17} /> Manakula Vinayagar Institute of Technology</div></div>
+      <div className="page-intro"><p className="eyebrow">ACADEMIC PLANNING</p><h1>College Timetable Generator</h1><div className="intro-college"><GraduationCap size={17} /> Manakula Vinayagar Institute of Technology</div></div>
       <div className="section-list">
         <Accordion id="collegeTimings" number="00" title="COLLEGE TIMINGS" description="Configure the institution-wide working week and period timings." icon={Clock3} open={openSection === 'collegeTimings'} onToggle={toggle}>
           <CollegeTimingsPanel value={collegeTimings} onChange={updateCollegeTimings} />

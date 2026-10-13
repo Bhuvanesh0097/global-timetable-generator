@@ -526,3 +526,36 @@
   .overall-staff-export-source[data-overall-print="true"]{height:210mm!important;max-height:210mm!important}
   .overall-staff-export-source[data-overall-print="true"] .teacher-grid-wrap{height:176mm!important}
 }
+
+/* Main header and saved-timetable sidebar presentation. */
+.topbar{height:100px;justify-content:center}
+.college-banner{display:block;width:min(270px,calc(100vw - 34px));height:auto;max-height:92px;object-fit:contain}
+.workspace-layout{padding-top:24px}
+.saved-timetable-sidebar{height:calc(100vh - 138px);max-height:calc(100vh - 28px);padding:14px 12px;border:0;border-right:1px solid #0757bd;border-radius:0;background:var(--blue);color:#fff}
+.saved-timetable-sidebar-heading{border-bottom-color:#ffffff66}
+.saved-timetable-sidebar-heading h2{color:#fff}
+.saved-timetable-sidebar-heading>span,.saved-timetable-sidebar-message{color:#e7f0ff}
+.saved-timetable-tree{flex:1}
+.saved-timetable-sidebar .saved-timetable-tree-label{color:#e7f0ff}
+.saved-timetable-sidebar .saved-timetable-department{color:#fff}
+.saved-timetable-sidebar .saved-timetable-section{color:#f5f8ff}
+.saved-timetable-sidebar .saved-timetable-department-indicator{color:#d5e7ff}
+.saved-timetable-sidebar .saved-timetable-department-toggle:hover{background:#ffffff1a}
+.saved-timetable-sidebar .saved-timetable-version{color:#fff}
+.saved-timetable-sidebar .saved-timetable-version:hover,.saved-timetable-sidebar .saved-timetable-version.active{border-color:#a9cbf3;background:#ffffff26;color:#fff}
+.saved-timetable-sidebar .saved-timetable-status.saved{background:#dbeafe;color:#174f91}
+.saved-timetable-sidebar .saved-timetable-status.locked{background:#e6e9ef;color:#334155}
+.saved-timetable-sidebar .saved-timetable-version svg{color:#e7f0ff}
+.saved-timetable-sidebar .saved-timetable-delete{color:#e7f0ff}
+.saved-timetable-sidebar .saved-timetable-delete:hover:not(:disabled){border-color:#fff;background:#fff;color:#85343a}
+@media(max-width:1180px){
+  .topbar{height:92px}
+  .workspace-layout{padding-top:17px}
+  .saved-timetable-sidebar{position:static;height:auto;min-height:0;max-height:230px}
+}
+@media(max-width:540px){
+  .topbar{height:86px}
+  .college-banner{width:min(240px,calc(100vw - 34px))}
+  .workspace-layout{padding-top:12px}
+  .saved-timetable-sidebar{max-height:205px}
+}
