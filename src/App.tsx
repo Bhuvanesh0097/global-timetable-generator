@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import {
-  BookOpen, ChevronDown, ChevronRight, ChevronUp, Clock3, Database, LockKeyhole,
+  BookOpen, CalendarCheck, ChevronDown, ChevronRight, ChevronUp, Clock3, LockKeyhole,
   FlaskConical, GraduationCap, Plus, Settings2, Sparkles, Star, Trash2, Users,
 } from 'lucide-react'
 import type { CoreSubject, LabAssignment, LabDefinition, OtherSubject, Section, SectionName, SectionSubjectAssignment, SpecialActivity, SpecialActivityAssignment, StaffMember, TimetableSetup, WeekDay } from './models'
@@ -1949,7 +1949,7 @@ function App() {
     <div className="workspace-layout">
       <aside className="saved-timetable-sidebar" aria-label="Saved Timetables">
         <div className="saved-timetable-sidebar-heading">
-          <h2><Database size={17} aria-hidden="true" />Saved Timetables</h2>
+          <h2><CalendarCheck size={17} aria-hidden="true" />Saved Timetables</h2>
           {savedNavigationLoading && <span aria-label="Loading saved timetables">…</span>}
         </div>
         {savedNavigationError
