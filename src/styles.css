@@ -528,19 +528,25 @@
 }
 
 /* Main header and saved-timetable sidebar presentation. */
-.topbar{height:100px;justify-content:center}
-.college-banner{display:block;width:min(270px,calc(100vw - 34px));height:auto;max-height:92px;object-fit:contain}
-.workspace-layout{padding-top:24px}
-.saved-timetable-sidebar{height:calc(100vh - 138px);max-height:calc(100vh - 28px);padding:14px 12px;border:0;border-right:1px solid #0757bd;border-radius:0;background:var(--blue);color:#fff}
-.saved-timetable-sidebar-heading{border-bottom-color:#ffffff66}
-.saved-timetable-sidebar-heading h2{color:#fff}
+.topbar{height:92px;justify-content:center;background:#d9eafc;border-bottom-color:#c7dbee}
+.college-banner{display:block;width:min(270px,calc(100vw - 34px));height:auto;max-height:90px;object-fit:contain}
+.workspace-layout{width:100%;margin:0;padding:4px 3.7vw 36px 0;grid-template-columns:minmax(190px,14vw) minmax(0,1fr);gap:3vw;align-items:stretch;min-height:calc(100vh - 56px)}
+.workspace-layout>.main-content{padding:28px 0 0}
+.saved-timetable-sidebar{position:static;align-self:stretch;height:auto;min-height:0;max-height:none;padding:14px 15px;border:0;border-right:1px solid #12376e;border-radius:0;background:#174080;color:#fff}
+.saved-timetable-sidebar-heading{border-bottom-color:#ffffff66;padding:0 0 11px 10px}
+.saved-timetable-sidebar-heading h2{display:flex;align-items:center;gap:9px;color:#fff;font-size:14px}
+.saved-timetable-sidebar-heading h2 svg{flex:none}
 .saved-timetable-sidebar-heading>span,.saved-timetable-sidebar-message{color:#e7f0ff}
 .saved-timetable-tree{flex:1}
+.saved-timetable-tree>ul>li{margin-top:8px}
 .saved-timetable-sidebar .saved-timetable-tree-label{color:#e7f0ff}
-.saved-timetable-sidebar .saved-timetable-department{color:#fff}
+.saved-timetable-sidebar .saved-timetable-department{color:#fff;font-size:14px}
+.saved-timetable-sidebar .saved-timetable-department-toggle{min-height:50px;justify-content:space-between;gap:9px;padding:0 12px;border-radius:8px;background:#224e8c;color:#fff}
+.saved-timetable-sidebar .saved-timetable-department-toggle:hover{background:#2a5898}
+.saved-timetable-sidebar .saved-timetable-department-icon{width:21px;height:21px;flex:none;color:#fff}
+.saved-timetable-sidebar .saved-timetable-department-indicator{width:18px;height:18px;margin-left:auto;flex:none;color:#fff;transform:rotate(0);transition:transform .15s ease}
+.saved-timetable-sidebar .saved-timetable-department-indicator.expanded{transform:rotate(90deg)}
 .saved-timetable-sidebar .saved-timetable-section{color:#f5f8ff}
-.saved-timetable-sidebar .saved-timetable-department-indicator{color:#d5e7ff}
-.saved-timetable-sidebar .saved-timetable-department-toggle:hover{background:#ffffff1a}
 .saved-timetable-sidebar .saved-timetable-version{color:#fff}
 .saved-timetable-sidebar .saved-timetable-version:hover,.saved-timetable-sidebar .saved-timetable-version.active{border-color:#a9cbf3;background:#ffffff26;color:#fff}
 .saved-timetable-sidebar .saved-timetable-status.saved{background:#dbeafe;color:#174f91}
@@ -549,13 +555,13 @@
 .saved-timetable-sidebar .saved-timetable-delete{color:#e7f0ff}
 .saved-timetable-sidebar .saved-timetable-delete:hover:not(:disabled){border-color:#fff;background:#fff;color:#85343a}
 @media(max-width:1180px){
-  .topbar{height:92px}
-  .workspace-layout{padding-top:17px}
-  .saved-timetable-sidebar{position:static;height:auto;min-height:0;max-height:230px}
+  .workspace-layout{width:min(100% - 44px,1120px);margin:0 auto;padding:17px 0 28px;grid-template-columns:minmax(0,1fr);gap:14px;align-items:start;min-height:0}
+  .workspace-layout>.main-content{padding:0}
+  .saved-timetable-sidebar{position:static;align-self:auto;height:auto;min-height:0;max-height:230px}
 }
 @media(max-width:540px){
   .topbar{height:86px}
-  .college-banner{width:min(240px,calc(100vw - 34px))}
-  .workspace-layout{padding-top:12px}
+  .college-banner{width:min(240px,calc(100vw - 34px));max-height:84px}
+  .workspace-layout{width:calc(100% - 28px);gap:12px;padding:12px 0 24px}
   .saved-timetable-sidebar{max-height:205px}
 }

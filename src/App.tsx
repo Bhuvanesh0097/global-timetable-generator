@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import {
-  BookOpen, ChevronDown, ChevronUp, Clock3, LockKeyhole,
+  BookOpen, ChevronDown, ChevronRight, ChevronUp, Clock3, Database, LockKeyhole,
   FlaskConical, GraduationCap, Plus, Settings2, Sparkles, Star, Trash2, Users,
 } from 'lucide-react'
 import type { CoreSubject, LabAssignment, LabDefinition, OtherSubject, Section, SectionName, SectionSubjectAssignment, SpecialActivity, SpecialActivityAssignment, StaffMember, TimetableSetup, WeekDay } from './models'
@@ -1949,7 +1949,7 @@ function App() {
     <div className="workspace-layout">
       <aside className="saved-timetable-sidebar" aria-label="Saved Timetables">
         <div className="saved-timetable-sidebar-heading">
-          <h2>Saved Timetables</h2>
+          <h2><Database size={17} aria-hidden="true" />Saved Timetables</h2>
           {savedNavigationLoading && <span aria-label="Loading saved timetables">…</span>}
         </div>
         {savedNavigationError
@@ -1966,7 +1966,7 @@ function App() {
                       className="saved-timetable-tree-label saved-timetable-department saved-timetable-department-toggle"
                       aria-expanded={expanded}
                       onClick={() => setExpandedSavedDepartments((current) => ({ ...current, [department.name]: !current[department.name] }))}
-                    ><span className="saved-timetable-department-indicator" aria-hidden="true">{expanded ? '▾' : '▸'}</span>{department.name}</button>
+                    ><GraduationCap size={21} strokeWidth={1.8} className="saved-timetable-department-icon" aria-hidden="true" />{department.name}<ChevronRight size={18} className={`saved-timetable-department-indicator${expanded ? ' expanded' : ''}`} aria-hidden="true" /></button>
                     {expanded && <ul>{department.years.map((year) => <li key={year.name}>
                       <span className="saved-timetable-tree-label">{year.name}</span>
                       <ul>{year.semesters.map((semester) => <li key={semester.name}>
